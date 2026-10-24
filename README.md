@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="assets/daymark.svg" width="44" height="44" alt="" />
+  <sub><img src="assets/daymark.svg" width="44" height="44" alt=""  /></sub>
   &nbsp;Daymark
 </h1>
 
