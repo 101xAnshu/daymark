@@ -15,7 +15,7 @@ usage() {
 Usage: ./install.sh [--no-build] [--x11] [--uninstall [--purge]]
 
   --no-build       use an existing target/release/daymark
-  --x11            build the optional X11 window backend as well
+  --x11            accepted for compatibility; the X11 backend is built in
   --uninstall      remove the app, desktop entry, autostart entry and extension
   --purge          with --uninstall, also delete all recorded history
 EOF
@@ -94,11 +94,6 @@ if [ "${BUILD}" = 1 ]; then
     }
     command -v pkg-config >/dev/null 2>&1 || {
         echo "pkg-config is required. Install it with: sudo apt install pkg-config" >&2
-        exit 1
-    }
-    pkg-config --exists sqlite3 || {
-        echo "SQLite development files are required. Install them with:" >&2
-        echo "  sudo apt install build-essential pkg-config libsqlite3-dev" >&2
         exit 1
     }
     (cd "${ROOT}" && cargo build --release ${FEATURES})

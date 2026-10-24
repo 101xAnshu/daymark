@@ -299,6 +299,40 @@ pub fn system_prefers_dark() -> bool {
     false
 }
 
+/// Watch GNOME's colour scheme with a single long-lived `gsettings monitor`
+/// child. Each line flips `signal`; the UI thread re-reads the value on its own
+/// timer, so no Slint type ever crosses a thread boundary.
+///
+/// Returns `false` when the monitor could not be started. The caller can then
+/// fall back to sampling the scheme periodically.
+pub fn watch_color_scheme(signal: std::sync::Arc<std::sync::atomic::AtomicBool>) -> bool {
+    let mut child = match Command::new("gsettings")
+        .args(["monitor", "org.gnome.desktop.interface", "color-scheme"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    std::thread::Builder::new()
+        .name("daymark-theme".into())
+        .spawn(move || {
+            use std::io::BufRead;
+            if let Some(stdout) = child.stdout.take() {
+                for line in std::io::BufReader::new(stdout).lines() {
+                    if line.is_err() {
+                        break;
+                    }
+                    signal.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            let _ = child.wait();
+        })
+        .is_ok()
+}
+
 pub fn spawn_detached(program: &str, args: &[&str]) -> Result<(), String> {
     let mut child = Command::new(program)
         .args(args)

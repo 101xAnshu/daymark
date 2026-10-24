@@ -952,6 +952,13 @@ impl WindowInner {
         result
     }
 
+    /// Daymark backport: hide the window but keep the event loop alive even when
+    /// it is the last visible window. Used for "close to the background": the
+    /// process keeps tracking until the user quits from Settings.
+    pub fn hide_without_quitting(&self) -> Result<(), PlatformError> {
+        self.window_adapter().set_visible(false)
+    }
+
     /// returns the color theme used
     pub fn color_scheme(&self) -> ColorScheme {
         self.window_adapter()

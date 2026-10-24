@@ -7,7 +7,7 @@ use slint::ComponentHandle;
 use daymark::AppWindow;
 use daymark::app::AppController;
 use daymark::db::{self, Store};
-use daymark::instance::{self, COMMAND_NONE, InstanceGuard};
+use daymark::instance::{self, COMMAND_NONE, COMMAND_QUIT, InstanceGuard};
 use daymark::settings::{self, Settings};
 use daymark::tracker;
 
@@ -79,6 +79,12 @@ fn real_main() -> Result<(), String> {
     let _ = std::fs::create_dir_all(db::runtime_dir());
     settings::write_extension_config(&db::runtime_dir(), settings.idle_seconds);
 
+    // One-time cleanup: fold old fallback rows (wmclass:…) into their desktop
+    // entries and drop shell-internal identities such as gjs.
+    if let Some(store) = &ui_store {
+        daymark::db::migrate_legacy_identities(store);
+    }
+
     let tracker = if ui_store.is_some() {
         match Store::open_default() {
             Ok(write_store) => Some(tracker::spawn(write_store, settings.clone())),
@@ -91,13 +97,51 @@ fn real_main() -> Result<(), String> {
         None
     };
 
+    let command = Arc::new(AtomicU8::new(COMMAND_NONE));
+    let shutting_down = Arc::new(AtomicBool::new(false));
+    let waker: Arc<std::sync::Mutex<Option<std::thread::Thread>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    guard.listen(
+        shutting_down.clone(),
+        command.clone(),
+        if background {
+            Some(waker.clone())
+        } else {
+            None
+        },
+    )?;
+
+    // `--background` must be genuinely invisible: no Slint platform, no winit
+    // window, no event loop. The tracker and IPC listener run on their own
+    // threads. The interface is created only when the user asks for it, either
+    // from the application grid (a second launch sends "show") or by launching
+    // Daymark normally.
+    if background {
+        if let Ok(mut slot) = waker.lock() {
+            *slot = Some(std::thread::current());
+        }
+        loop {
+            match command.swap(COMMAND_NONE, Ordering::SeqCst) {
+                instance::COMMAND_SHOW => break,
+                COMMAND_QUIT => {
+                    shutting_down.store(true, Ordering::Relaxed);
+                    if let Some(tracker) = &tracker {
+                        tracker.shutdown();
+                    }
+                    drop(guard);
+                    return Ok(());
+                }
+                _ => std::thread::park(),
+            }
+        }
+    }
+
     let ui = AppWindow::new().map_err(|e| {
         format!(
             "could not open a window ({e}). Daymark needs a running GNOME Wayland or X11 session."
         )
     })?;
 
-    let command = Arc::new(AtomicU8::new(COMMAND_NONE));
     let controller = AppController::new(ui, ui_store, tracker, settings, Some(command.clone()));
     if let Some(e) = store_error {
         controller.borrow_mut().set_load_error(e);
@@ -107,9 +151,6 @@ fn real_main() -> Result<(), String> {
             .borrow_mut()
             .set_external_error(format!("Could not configure startup: {e}"));
     }
-
-    let shutting_down = Arc::new(AtomicBool::new(false));
-    guard.listen(shutting_down.clone(), command.clone())?;
 
     // A single, inexpensive lifecycle timer. It handles the local IPC socket
     // and refreshes only when visible data actually changed.
@@ -127,13 +168,11 @@ fn real_main() -> Result<(), String> {
     // The timer must outlive main's event loop.
     Box::leak(Box::new(timer));
 
-    if !background {
-        controller
-            .borrow()
-            .ui
-            .show()
-            .map_err(|e| format!("could not show the window: {e}"))?;
-    }
+    controller
+        .borrow()
+        .ui
+        .show()
+        .map_err(|e| format!("could not show the window: {e}"))?;
 
     slint::run_event_loop().map_err(|e| format!("the interface stopped: {e}"))?;
 

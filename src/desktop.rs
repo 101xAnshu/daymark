@@ -65,7 +65,6 @@ fn parse_desktop_file(path: &Path, id: String) -> Option<DesktopEntry> {
     let mut exec = None;
     let mut wm_class = None;
     let mut hidden = false;
-    let mut no_display = false;
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('[') {
@@ -85,11 +84,13 @@ fn parse_desktop_file(path: &Path, id: String) -> Option<DesktopEntry> {
             "Exec" => exec = Some(value.to_string()),
             "StartupWMClass" => wm_class = Some(value.to_string()),
             "Hidden" => hidden = value.eq_ignore_ascii_case("true"),
-            "NoDisplay" => no_display = value.eq_ignore_ascii_case("true"),
             _ => {}
         }
     }
-    if hidden || no_display {
+    // `NoDisplay` only hides an entry from launchers. We never show a launcher,
+    // and several real applications (T3 Code, for one) publish their only
+    // identity and icon through a NoDisplay entry, so keep it in the index.
+    if hidden {
         return None;
     }
     Some(DesktopEntry {
@@ -102,11 +103,100 @@ fn parse_desktop_file(path: &Path, id: String) -> Option<DesktopEntry> {
     })
 }
 
+/// Split an `Exec` line into arguments the way the desktop-entry spec does:
+/// double quotes group words, backslash escapes the next character.
+fn exec_tokens(exec: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut has_token = false;
+    let mut chars = exec.trim().chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                has_token = true;
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => {
+                            if let Some(&next) = chars.peek() {
+                                chars.next();
+                                current.push(next);
+                            }
+                        }
+                        c => current.push(c),
+                    }
+                }
+            }
+            '\'' => {
+                has_token = true;
+                for c in chars.by_ref() {
+                    if c == '\'' {
+                        break;
+                    }
+                    current.push(c);
+                }
+            }
+            c if c.is_whitespace() => {
+                if has_token {
+                    tokens.push(std::mem::take(&mut current));
+                    has_token = false;
+                }
+            }
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                    has_token = true;
+                }
+            }
+            c => {
+                current.push(c);
+                has_token = true;
+            }
+        }
+    }
+    if has_token {
+        tokens.push(current);
+    }
+    tokens
+}
+
 fn exec_basename(exec: &str) -> Option<String> {
-    let first = exec.split_whitespace().next()?;
-    Path::new(first)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
+    for token in exec_tokens(exec) {
+        let lower = token.to_ascii_lowercase();
+        // `env VAR=value command` and `env -u VAR command` wrappers.
+        if lower == "env" {
+            continue;
+        }
+        if lower.starts_with('-') {
+            continue;
+        }
+        if token.contains('=') && !token.contains('/') {
+            continue; // VAR=value
+        }
+        return Path::new(&token)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase());
+    }
+    None
+}
+
+/// Identities that belong to the desktop shell itself, never to a user app.
+/// They can still surface as focused windows through Mutter, especially on
+/// GNOME (gjs hosts the shell's notifications, screen saver and desktop icons).
+pub fn is_internal_window(wm_class: Option<&str>, name: Option<&str>) -> bool {
+    let class = wm_class
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '_'], "-");
+    if matches!(
+        class.as_str(),
+        "gjs" | "gnome-shell" | "gnome-shell-extension" | "ding" | "plasmashell" | "kwin_wayland"
+    ) {
+        return true;
+    }
+    let name = name.unwrap_or("").trim().to_ascii_lowercase();
+    class.is_empty() && matches!(name.as_str(), "gjs" | "gnome-shell")
 }
 
 impl DesktopIndex {
@@ -339,55 +429,90 @@ fn home_icons() -> Vec<PathBuf> {
     roots
 }
 
-const THEMES: &[&str] = &[
-    "Yaru-wartybrown",
-    "Yaru",
-    "Adwaita",
-    "hicolor",
-    "Papirus",
-    "breeze",
-];
+/// Icon themes to try, after the user's active theme. `hicolor` is the
+/// specification-mandated fallback and covers most installed applications.
+const FALLBACK_THEMES: &[&str] = &["hicolor", "Adwaita", "Yaru", "Papirus", "breeze"];
 const SIZES: &[&str] = &[
-    "48x48", "64x64", "32x32", "96x96", "128x128", "256x256", "512x512",
+    "64x64", "48x48", "96x96", "128x128", "32x32", "256x256", "512x512",
 ];
 
-/// Locate a PNG for an icon name. Only app icons are searched; symbolic
-/// monochrome variants are skipped because they lose their meaning when shown
-/// as full-colour tiles.
-pub fn find_icon_png(icon: &str) -> Option<PathBuf> {
+fn active_icon_theme() -> String {
+    static THEME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    THEME
+        .get_or_init(|| {
+            let out = std::process::Command::new("gsettings")
+                .args(["get", "org.gnome.desktop.interface", "icon-theme"])
+                .stderr(std::process::Stdio::null())
+                .output();
+            out.ok()
+                .filter(|o| o.status.success())
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .trim()
+                        .trim_matches('\'')
+                        .trim_matches('"')
+                        .to_string()
+                })
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| "Yaru".into())
+        })
+        .clone()
+}
+
+/// Locate an icon for an icon name. PNG is preferred for its predictable cost,
+/// but SVG is accepted (Slint 1.8's `std` build already includes the renderer),
+/// so applications that only ship a scalable icon still get their real mark.
+/// Symbolic monochrome variants are skipped because they lose their meaning
+/// when shown as full-colour tiles.
+pub fn find_icon(icon: &str) -> Option<PathBuf> {
     let trimmed = icon.trim();
     if trimmed.is_empty() {
         return None;
     }
     let as_path = Path::new(trimmed);
-    if as_path.is_absolute()
-        && as_path
+    if as_path.is_absolute() && as_path.is_file() {
+        let ext = as_path
             .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("png"))
-        && as_path.is_file()
-    {
-        return Some(as_path.to_path_buf());
+            .map(|e| e.to_string_lossy().to_ascii_lowercase());
+        if matches!(ext.as_deref(), Some("png" | "svg" | "svgz")) {
+            return Some(as_path.to_path_buf());
+        }
     }
     let stem = trimmed
         .strip_suffix(".png")
         .or_else(|| trimmed.strip_suffix(".svg"))
+        .or_else(|| trimmed.strip_suffix(".svgz"))
         .or_else(|| trimmed.strip_suffix(".xpm"))
         .unwrap_or(trimmed);
     if stem.ends_with("-symbolic") {
         return None;
     }
+    let active = active_icon_theme();
+    let mut themes = vec![active];
+    for theme in FALLBACK_THEMES {
+        if !themes.iter().any(|t| t.eq_ignore_ascii_case(theme)) {
+            themes.push((*theme).to_string());
+        }
+    }
     let roots = home_icons();
-    for theme in THEMES {
-        for size in SIZES {
-            for root in &roots {
-                let candidate = if root.ends_with("pixmaps") {
-                    root.join(format!("{stem}.png"))
-                } else {
-                    root.join(theme)
-                        .join(size)
-                        .join("apps")
-                        .join(format!("{stem}.png"))
-                };
+    for theme in &themes {
+        for root in &roots {
+            let theme_dir = root.join(theme);
+            if !theme_dir.is_dir() {
+                continue;
+            }
+            for size in SIZES {
+                let apps = theme_dir.join(size).join("apps");
+                for ext in ["png", "svg"] {
+                    let candidate = apps.join(format!("{stem}.{ext}"));
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+            let scalable = theme_dir.join("scalable").join("apps");
+            for ext in ["svg", "png"] {
+                let candidate = scalable.join(format!("{stem}.{ext}"));
                 if candidate.is_file() {
                     return Some(candidate);
                 }
@@ -397,9 +522,11 @@ pub fn find_icon_png(icon: &str) -> Option<PathBuf> {
     // Last chance: a few apps only ship one unscaled icon in pixmaps.
     for root in &roots {
         if root.ends_with("pixmaps") {
-            let candidate = root.join(format!("{stem}.png"));
-            if candidate.is_file() {
-                return Some(candidate);
+            for ext in ["png", "svg", "xpm"] {
+                let candidate = root.join(format!("{stem}.{ext}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
     }
@@ -428,16 +555,49 @@ mod tests {
     }
 
     #[test]
-    fn ignores_hidden_and_nodisplay_entries() {
+    fn ignores_hidden_entries_but_keeps_nodisplay_ones() {
         let dir = std::env::temp_dir().join(format!(
             "daymark-desktop-test-hidden-{}",
             std::process::id()
         ));
         let _ = fs::create_dir_all(&dir);
-        let path = dir.join("hidden.desktop");
-        fs::write(&path, "[Desktop Entry]\nName=Hidden\nHidden=true\n").unwrap();
-        assert!(parse_desktop_file(&path, "hidden.desktop".into()).is_none());
+        let hidden = dir.join("hidden.desktop");
+        fs::write(&hidden, "[Desktop Entry]\nName=Hidden\nHidden=true\n").unwrap();
+        assert!(parse_desktop_file(&hidden, "hidden.desktop".into()).is_none());
+
+        // A NoDisplay entry is the only identity some apps publish.
+        let quiet = dir.join("com.example.Quiet.desktop");
+        fs::write(
+            &quiet,
+            "[Desktop Entry]\nName=Quiet\nNoDisplay=true\nIcon=/tmp/quiet.png\n",
+        )
+        .unwrap();
+        let entry = parse_desktop_file(&quiet, "com.example.Quiet.desktop".into()).unwrap();
+        assert_eq!(entry.name, "Quiet");
+        assert_eq!(entry.icon.as_deref(), Some("/tmp/quiet.png"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_quoted_exec_lines() {
+        assert_eq!(
+            exec_basename("\"/opt/T3 Code (Nightly)/t3code\" %U"),
+            Some("t3code".into())
+        );
+        assert_eq!(
+            exec_basename("env FOO=bar /usr/bin/example --flag"),
+            Some("example".into())
+        );
+        assert_eq!(exec_basename("example"), Some("example".into()));
+    }
+
+    #[test]
+    fn recognises_shell_internal_windows() {
+        assert!(is_internal_window(Some("gjs"), Some("gjs")));
+        assert!(is_internal_window(Some("GNOME Shell"), None));
+        assert!(is_internal_window(Some("ding"), None));
+        assert!(!is_internal_window(Some("com.t3tools.T3Code"), None));
+        assert!(!is_internal_window(Some("brave-browser"), Some("Brave")));
     }
 
     #[test]

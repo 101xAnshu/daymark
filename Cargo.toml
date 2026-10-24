@@ -1,6 +1,6 @@
 [package]
 name = "daymark"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A quiet screen time journal for GNOME"
 license = "MIT"
@@ -8,7 +8,7 @@ rust-version = "1.85"
 
 [features]
 default = []
-# Optional X11 window backend for Ubuntu GNOME on Xorg (adds about 0.7 MB).
+# Kept for compatibility: the X11 window backend is now built in by default.
 x11 = ["slint/backend-winit-x11"]
 
 [dependencies]
@@ -16,10 +16,12 @@ slint = { version = "=1.8.0", default-features = false, features = [
     "std",
     "compat-1-2",
     "backend-winit-wayland",
+    "backend-winit-x11",
     "renderer-software",
     "software-renderer-systemfonts",
+    "accessibility",
 ] }
-rusqlite = { version = "0.37", default-features = false }
+rusqlite = { version = "0.37", default-features = false, features = ["bundled"] }
 libc = "0.2"
 png = "0.18"
 
@@ -36,7 +38,8 @@ strip = true
 # A tiny local backport: Slint 1.8 does not expose the native window-move hook
 # that later versions use for custom frameless title bars. The two vendored
 # crates are unmodified upstream sources except for a no-op trait hook,
-# Window::start_window_move(), and the winit implementation calling drag_window.
+# Window::start_window_move(), the winit implementation calling drag_window,
+# the Daymark app_id/WM_CLASS/title, and hide_without_quitting().
 [patch.crates-io]
 i-slint-core = { path = "vendor/i-slint-core" }
 i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }

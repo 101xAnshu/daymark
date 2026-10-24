@@ -112,18 +112,31 @@ impl TrackerHandle {
     }
     pub fn stop(&self) {
         self.quit.store(true, Ordering::Relaxed);
+        if let Ok(slot) = self.join.lock() {
+            if let Some(handle) = slot.as_ref() {
+                handle.thread().unpark();
+            }
+        }
     }
     /// Ask the tracker to discard all recorded intervals. It happens on the
     /// tracking thread so an open interval can never be re-created afterwards.
     pub fn request_reset(&self) {
         self.reset.store(true, Ordering::Relaxed);
+        self.wake();
     }
     /// Stop and wait briefly for the final interval to be closed cleanly.
     pub fn shutdown(&self) {
-        self.quit.store(true, Ordering::Relaxed);
+        self.stop();
         if let Ok(mut slot) = self.join.lock() {
             if let Some(handle) = slot.take() {
                 let _ = handle.join();
+            }
+        }
+    }
+    fn wake(&self) {
+        if let Ok(slot) = self.join.lock() {
+            if let Some(handle) = slot.as_ref() {
+                handle.thread().unpark();
             }
         }
     }
@@ -201,13 +214,21 @@ fn parse_state(text: &str) -> Option<ExtensionState> {
                 .map(str::to_string),
         })
     });
+    let away_since = value
+        .get("away_since")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    // v1 of the companion wrote milliseconds; v2 writes seconds. Normalise so
+    // an upgraded extension and an old state file agree on the unit.
+    let away_since = if away_since > 10_000_000_000 {
+        away_since / 1000
+    } else {
+        away_since
+    };
     Some(ExtensionState {
         focus,
         away: value.get("away").and_then(|v| v.as_bool()).unwrap_or(false),
-        away_since: value
-            .get("away_since")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
+        away_since,
         idle: value.get("idle").and_then(|v| v.as_bool()).unwrap_or(false),
         locked: value
             .get("locked")
@@ -540,6 +561,18 @@ impl Tracker {
             return;
         };
 
+        // Shell-owned surfaces (gjs, the desktop-icons process, the screen
+        // shield) are not applications. The extension filters them too; this
+        // guard covers an old state file or a future Shell regression.
+        if crate::desktop::is_internal_window(focus.wm_class.as_deref(), focus.name.as_deref()) {
+            if let Some(session) = &self.current {
+                let end = session.started + session.accumulated;
+                self.close_current(end);
+            }
+            self.set_status(TrackingStatus::Active, "No active window");
+            return;
+        }
+
         let app = self.resolve(&focus);
         let current_key = self.current.as_ref().map(|s| s.key.clone());
         let needs_start = current_key.as_deref() != Some(app.key.as_str());
@@ -615,14 +648,9 @@ pub fn spawn(store: Store, settings: Settings) -> TrackerHandle {
             while !thread_handle.quit.load(Ordering::Relaxed) {
                 tracker.tick();
                 // Two seconds is forgiving enough for input/idle transitions
-                // while waking the CPU only 30 times a minute.
-                let deadline = Instant::now() + Duration::from_secs(2);
-                while Instant::now() < deadline {
-                    if thread_handle.quit.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
+                // while waking the CPU only 30 times a minute. `park_timeout`
+                // is interrupted immediately by `stop()`/`request_reset()`.
+                std::thread::park_timeout(Duration::from_secs(2));
             }
             if let Some(session) = &tracker.current {
                 let end = session.started + session.accumulated;
@@ -659,6 +687,14 @@ mod tests {
         assert!(state.focus.is_none());
         assert!(state.away);
         assert!(state.locked);
+    }
+
+    #[test]
+    fn normalises_millisecond_away_timestamps() {
+        let text = r#"{"v":1,"focus":null,"away":true,"away_since":1710000000123,"idle":false,"locked":false}"#;
+        assert_eq!(parse_state(text).unwrap().away_since, 1_710_000_000);
+        let text = r#"{"v":2,"focus":null,"away":true,"away_since":1710000000,"idle":false,"locked":false}"#;
+        assert_eq!(parse_state(text).unwrap().away_since, 1_710_000_000);
     }
 
     #[test]

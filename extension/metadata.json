@@ -2,6 +2,13 @@
   "uuid": "daymark@daymark.app",
   "name": "Daymark Tracking",
   "description": "Shares the active application, idle and lock state with the local Daymark screen time app. No window titles, keystrokes, clipboard data or network access.",
-  "shell-version": ["45", "46", "47", "48", "49", "50"],
-  "version": 1
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "version": 2
 }

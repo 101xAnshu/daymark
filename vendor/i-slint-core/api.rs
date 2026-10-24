@@ -461,6 +461,13 @@ impl Window {
         self.0.hide()
     }
 
+    /// Daymark backport: hide the window but keep the event loop alive even when
+    /// it is the last visible window. "Close" means "keep tracking in the
+    /// background" until the user quits from Settings.
+    pub fn hide_without_quitting(&self) -> Result<(), PlatformError> {
+        self.0.hide_without_quitting()
+    }
+
     /// This function allows registering a callback that's invoked during the different phases of
     /// rendering. This allows custom rendering on top or below of the scene.
     pub fn set_rendering_notifier(

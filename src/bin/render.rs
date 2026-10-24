@@ -179,7 +179,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut writer = encoder.write_header()?;
         let mut bytes = Vec::with_capacity(buffer.as_slice().len() * 4);
         for pixel in buffer.as_slice() {
-            bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+            // The software renderer's snapshot is RGBx: the fourth byte is
+            // padding, not an alpha channel. Writing it verbatim produced fully
+            // transparent PNGs (they looked like a blank sheet everywhere).
+            bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, 255]);
         }
         writer.write_image_data(&bytes)?;
     }

@@ -92,6 +92,38 @@ export component SearchIcon inherits Rectangle {
     }
 }
 
+export component AppIcon inherits Rectangle {
+    in property <image> source;
+    in property <bool> has-icon: false;
+    in property <string> initial: "?";
+    in property <color> tint: Theme.accent;
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    background: has-icon ? transparent : tint.with-alpha(0.14);
+    clip: true;
+    if (has-icon) : Image {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        source: root.source;
+        image-fit: contain;
+    }
+    if (!has-icon) : Text {
+        text: root.initial;
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        font-size: Theme.small-size;
+        font-weight: 600;
+        color: root.tint;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 export component Chevron inherits Rectangle {
     in property <bool> left: false;
     in property <bool> enabled: true;
@@ -119,7 +151,7 @@ export component Chevron inherits Rectangle {
 }
 
 export component Switch inherits Rectangle {
-    in-out property <bool> checked: false;
+    in property <bool> checked: false;
     in property <bool> enabled: true;
     callback toggled(bool);
     width: 38px;
@@ -141,8 +173,9 @@ export component Switch inherits Rectangle {
         mouse-cursor: pointer;
         clicked => {
             if (root.enabled) {
-                root.checked = !root.checked;
-                root.toggled(root.checked);
+                // Never self-assign: `checked` is a one-way binding from the
+                // controller, so a failed change must snap back.
+                root.toggled(!root.checked);
             }
         }
     }

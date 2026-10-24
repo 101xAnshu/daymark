@@ -383,7 +383,25 @@ impl WinitWindowAdapter {
     ) -> Result<WindowAttributes, PlatformError> {
         let mut attrs = WindowAttributes::default().with_transparent(true).with_visible(false);
 
-        attrs = attrs.with_title("Slint Window".to_string());
+        // Daymark backport: give the window a real identity. Without this the
+        // Wayland toplevel has an empty app_id, so GNOME cannot match it to
+        // daymark.desktop and shows a generic "Unknown" entry in the dock.
+        attrs = attrs.with_title("Daymark".to_string());
+        #[cfg(all(unix, not(target_arch = "wasm32"), feature = "wayland"))]
+        {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attrs = attrs.with_name("daymark", "daymark");
+        }
+        #[cfg(all(
+            unix,
+            not(target_arch = "wasm32"),
+            not(feature = "wayland"),
+            feature = "x11"
+        ))]
+        {
+            use winit::platform::x11::WindowAttributesExtX11;
+            attrs = attrs.with_name("daymark", "daymark");
+        }
 
         #[cfg(target_arch = "wasm32")]
         {

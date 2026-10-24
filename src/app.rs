@@ -5,8 +5,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Image, ModelRc, SharedPixelBuffer, VecModel};
@@ -20,6 +20,9 @@ use crate::tracker::{self, LiveState, TrackerHandle, TrackingStatus};
 use crate::{AppRow, AppWindow, DayBar, HistoryRow, HourBar, Theme};
 
 const HISTORY_DAYS: i32 = 14;
+/// Decoded icons are kept small; the UI shows them in a 28 pt tile.
+const ICON_MAX_PX: u32 = 96;
+const ICON_CACHE_LIMIT: usize = 256;
 
 struct IconCache {
     paths: HashMap<String, Option<PathBuf>>,
@@ -41,15 +44,27 @@ impl IconCache {
         let path = self
             .paths
             .entry(icon.to_string())
-            .or_insert_with(|| crate::desktop::find_icon_png(icon))
+            .or_insert_with(|| crate::desktop::find_icon(icon))
             .clone();
-        let image = path.and_then(|p| decode_png(&p));
-        if self.images.len() > 96 {
+        let image = path.as_deref().and_then(decode_icon);
+        if self.images.len() >= ICON_CACHE_LIMIT {
             self.images.clear();
         }
         self.images.insert(icon.to_string(), image.clone());
         image
     }
+}
+
+fn decode_icon(path: &std::path::Path) -> Option<Image> {
+    let is_svg = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz"));
+    if is_svg {
+        // Slint 1.8's `std` build already contains a vector renderer; the SVG
+        // stays vector-backed and is rasterised at the size the tile needs.
+        return Image::load_from_path(path).ok();
+    }
+    decode_png(path)
 }
 
 fn decode_png(path: &std::path::Path) -> Option<Image> {
@@ -64,13 +79,13 @@ fn decode_png_bytes(bytes: &[u8]) -> Option<Image> {
 fn decode_png_reader<R: std::io::BufRead + std::io::Seek>(reader: R) -> Option<Image> {
     let mut decoder = png::Decoder::new(reader);
     decoder.set_transformations(
-        png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
+        png::Transformations::EXPAND | png::Transformations::normalize_to_color8(),
     );
     let mut reader = decoder.read_info().ok()?;
     let mut buf = vec![0u8; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
     let (w, h) = (info.width, info.height);
-    if w == 0 || h == 0 || w > 1024 || h > 1024 {
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
         return None;
     }
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
@@ -96,8 +111,45 @@ fn decode_png_reader<R: std::io::BufRead + std::io::Seek>(reader: R) -> Option<I
     if rgba.len() != (w * h * 4) as usize {
         return None;
     }
+    let (rgba, w, h) = downscale_rgba(rgba, w, h, ICON_MAX_PX);
     let buffer = SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&rgba, w, h);
     Some(Image::from_rgba8(buffer))
+}
+
+/// Box-filtered downscale so a 1024 px application icon does not occupy
+/// megabytes for a 28 pt tile. Averaging alpha is fine for icon artwork.
+fn downscale_rgba(rgba: Vec<u8>, w: u32, h: u32, max: u32) -> (Vec<u8>, u32, u32) {
+    if w <= max && h <= max {
+        return (rgba, w, h);
+    }
+    let scale = (max as f32 / w.max(h) as f32).min(1.0);
+    let nw = ((w as f32 * scale).round() as u32).max(1);
+    let nh = ((h as f32 * scale).round() as u32).max(1);
+    let mut out = vec![0u8; (nw * nh * 4) as usize];
+    for y in 0..nh {
+        let sy0 = y * h / nh;
+        let sy1 = (((y + 1) * h) / nh).max(sy0 + 1);
+        for x in 0..nw {
+            let sx0 = x * w / nw;
+            let sx1 = (((x + 1) * w) / nw).max(sx0 + 1);
+            let mut acc = [0u64; 4];
+            let mut count = 0u64;
+            for sy in sy0..sy1 {
+                for sx in sx0..sx1 {
+                    let i = ((sy * w + sx) * 4) as usize;
+                    for c in 0..4 {
+                        acc[c] += rgba[i + c] as u64;
+                    }
+                    count += 1;
+                }
+            }
+            let o = ((y * nw + x) * 4) as usize;
+            for c in 0..4 {
+                out[o + c] = (acc[c] / count.max(1)) as u8;
+            }
+        }
+    }
+    (out, nw, nh)
 }
 
 fn search_icon() -> Option<Image> {
@@ -185,7 +237,13 @@ pub struct AppController {
     settings_open: bool,
     setup_open: bool,
     setup_ready: bool,
+    setup_busy: bool,
+    setup_job: Arc<Mutex<Option<Result<crate::platform::Capabilities, String>>>>,
     setup_last_check: Instant,
+    theme_signal: Arc<AtomicBool>,
+    theme_watch_live: bool,
+    last_theme_poll: Instant,
+    restore_maximized: bool,
     command: Option<Arc<AtomicU8>>,
 }
 
@@ -201,6 +259,12 @@ impl AppController {
             ThemePref::Light => false,
             ThemePref::Dark => true,
             ThemePref::System => crate::platform::system_prefers_dark(),
+        };
+        let theme_signal = Arc::new(AtomicBool::new(false));
+        let theme_watch_live = if settings.theme == ThemePref::System {
+            crate::platform::watch_color_scheme(theme_signal.clone())
+        } else {
+            false
         };
         let load_error = if store.is_none() {
             "The local data file could not be opened.".to_string()
@@ -228,7 +292,13 @@ impl AppController {
             settings_open: false,
             setup_open: false,
             setup_ready: false,
+            setup_busy: false,
+            setup_job: Arc::new(Mutex::new(None)),
             setup_last_check: Instant::now(),
+            theme_signal,
+            theme_watch_live,
+            last_theme_poll: Instant::now(),
+            restore_maximized: false,
             command,
         }));
 
@@ -260,6 +330,7 @@ impl AppController {
         self.ui
             .set_settings_error(self.settings_error.clone().into());
         self.ui.set_setup_ready(self.setup_ready);
+        self.ui.set_setup_busy(self.setup_busy);
         self.ui.set_tracking_title(self.tracking_title().into());
         self.ui
             .set_tracking_detail(self.last_live.detail.clone().into());
@@ -719,27 +790,7 @@ impl AppController {
             let c = controller.clone();
             controller.borrow().ui.on_setup_tracking(move || {
                 let mut ctl = c.borrow_mut();
-                ctl.settings_error.clear();
-                match crate::platform::install_extension() {
-                    Ok(caps) => {
-                        ctl.setup_ready = caps.state_fresh;
-                        ctl.setup_open = true;
-                        ctl.ui.set_setup_open(true);
-                        ctl.ui.set_setup_ready(caps.state_fresh);
-                        ctl.settings.autostart = true;
-                        if let Some(store) = &ctl.store {
-                            let _ = ctl.settings.save(store);
-                        }
-                        let _ = crate::platform::apply_autostart(true);
-                        ctl.force_refresh = true;
-                        ctl.refresh();
-                    }
-                    Err(e) => {
-                        ctl.settings_error = e;
-                        ctl.force_refresh = true;
-                        ctl.refresh();
-                    }
-                }
+                ctl.begin_setup();
             });
         }
         {
@@ -806,6 +857,7 @@ impl AppController {
                     ThemePref::Dark => true,
                     ThemePref::System => crate::platform::system_prefers_dark(),
                 };
+                ctl.ensure_theme_watcher();
                 ctl.save_settings();
                 ctl.force_refresh = true;
                 ctl.refresh();
@@ -879,8 +931,9 @@ impl AppController {
         {
             let c = controller.clone();
             controller.borrow().ui.on_hide_window(move || {
-                let ctl = c.borrow();
-                let _ = ctl.ui.hide();
+                let mut ctl = c.borrow_mut();
+                ctl.restore_maximized = ctl.ui.window().is_maximized();
+                let _ = ctl.ui.window().hide_without_quitting();
             });
         }
         {
@@ -911,6 +964,18 @@ impl AppController {
             let c = controller.clone();
             controller.borrow().ui.on_quit(move || {
                 c.borrow_mut().quit();
+            });
+        }
+        // Alt+F4 and compositor close requests behave like the ✕ control:
+        // hide to the background and keep tracking, never quit silently.
+        {
+            let c = controller.clone();
+            controller.borrow().ui.window().on_close_requested(move || {
+                if let Ok(mut ctl) = c.try_borrow_mut() {
+                    ctl.restore_maximized = ctl.ui.window().is_maximized();
+                    let _ = ctl.ui.window().hide_without_quitting();
+                }
+                slint::CloseRequestResponse::KeepWindowShown
             });
         }
     }
@@ -970,9 +1035,14 @@ impl AppController {
             match command.swap(COMMAND_NONE, Ordering::SeqCst) {
                 COMMAND_SHOW => {
                     self.force_refresh = true;
+                    self.last_theme_poll = Instant::now() - Duration::from_secs(30);
+                    self.theme_signal.store(true, Ordering::Relaxed);
                     let window = self.ui.window();
                     window.set_minimized(false);
                     let _ = self.ui.show();
+                    if self.restore_maximized {
+                        window.set_maximized(true);
+                    }
                 }
                 COMMAND_QUIT => {
                     self.quit();
@@ -981,8 +1051,13 @@ impl AppController {
                 _ => {}
             }
         }
+        if let Some(result) = self.setup_job.lock().ok().and_then(|mut job| job.take()) {
+            self.finish_setup(result);
+        }
+        self.apply_system_theme();
         if self.setup_open
             && !self.setup_ready
+            && !self.setup_busy
             && self.setup_last_check.elapsed() > Duration::from_secs(2)
         {
             self.setup_last_check = Instant::now();
@@ -1018,6 +1093,81 @@ impl AppController {
             self.last_live = live;
             self.refresh();
         }
+    }
+
+    /// Follow GNOME's colour scheme while the preference is "System". The
+    /// companion `gsettings monitor` thread only raises a flag, so the actual
+    /// read and every Slint mutation stay on the UI thread.
+    fn apply_system_theme(&mut self) {
+        if self.settings.theme != ThemePref::System {
+            return;
+        }
+        let notified = self.theme_signal.swap(false, Ordering::Relaxed);
+        let sample =
+            !self.theme_watch_live && self.last_theme_poll.elapsed() > Duration::from_secs(10);
+        if !notified && !sample {
+            return;
+        }
+        self.last_theme_poll = Instant::now();
+        let dark = crate::platform::system_prefers_dark();
+        if dark != self.dark {
+            self.dark = dark;
+            self.ui.global::<Theme>().set_dark(dark);
+            self.force_refresh = true;
+        }
+    }
+
+    /// Start the colour-scheme monitor when the user switches back to System.
+    fn ensure_theme_watcher(&mut self) {
+        if self.settings.theme != ThemePref::System || self.theme_watch_live {
+            return;
+        }
+        self.theme_watch_live = crate::platform::watch_color_scheme(self.theme_signal.clone());
+        self.last_theme_poll = Instant::now() - Duration::from_secs(30);
+    }
+
+    fn begin_setup(&mut self) {
+        if self.setup_busy {
+            return;
+        }
+        self.settings_error.clear();
+        self.setup_busy = true;
+        self.ui.set_setup_busy(true);
+        self.force_refresh = true;
+        self.refresh();
+        let job = self.setup_job.clone();
+        std::thread::Builder::new()
+            .name("daymark-setup".into())
+            .spawn(move || {
+                let result = crate::platform::install_extension();
+                if let Ok(mut slot) = job.lock() {
+                    *slot = Some(result);
+                }
+            })
+            .ok();
+    }
+
+    fn finish_setup(&mut self, result: Result<crate::platform::Capabilities, String>) {
+        self.setup_busy = false;
+        self.ui.set_setup_busy(false);
+        match result {
+            Ok(caps) => {
+                self.setup_ready = caps.state_fresh;
+                self.setup_open = true;
+                self.ui.set_setup_open(true);
+                self.ui.set_setup_ready(caps.state_fresh);
+                self.settings.autostart = true;
+                if let Some(store) = &self.store {
+                    let _ = self.settings.save(store);
+                }
+                let _ = crate::platform::apply_autostart(true);
+            }
+            Err(e) => {
+                self.settings_error = e;
+            }
+        }
+        self.force_refresh = true;
+        self.refresh();
     }
 
     pub fn set_load_error(&mut self, message: String) {

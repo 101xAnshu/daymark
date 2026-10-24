@@ -24,11 +24,12 @@ and which applications received the time. Everything is stored on this machine.
 - Ubuntu 26.04 with GNOME Shell 50.1 was used for the tested build. The source
   targets GNOME Shell 45–50; build from source on older distributions (the
   prebuilt artifact links the build machine's glibc).
-- Wayland is the default target. An optional X11 window backend is available.
-- To build: Rust 1.85+, `build-essential`, `pkg-config`, and `libsqlite3-dev`.
+- Wayland is the default target; the same build also includes the X11 window
+  backend.
+- To build: Rust 1.85+, `build-essential`, and `pkg-config`.
 
 ```bash
-sudo apt install build-essential pkg-config libsqlite3-dev
+sudo apt install build-essential pkg-config
 cargo build --release
 ./target/release/daymark
 ```
@@ -46,17 +47,13 @@ also enables the extension for your user.
 **First install needs one sign-out and sign-in.** GNOME on Wayland only scans
 for new Shell extensions at login. Daymark's setup sheet explains this; the
 extension is already installed and will begin reporting after the next login.
-Closing the window does not quit Daymark: tracking continues and the window can
-be reopened from the application grid.
+Closing the window (the ✕ control or Alt+F4) does not quit Daymark: tracking
+continues in a genuinely invisible background process, and the window can be
+reopened from the application grid. **Quit Daymark** in Settings stops it.
 
-For GNOME on Xorg, build with the optional backend:
-
-```bash
-./install.sh --x11
-# or: cargo build --release --features x11
-```
-
-The default Wayland-only build was chosen to keep the executable below 5 MB.
+The same build includes both the Wayland and X11 window backends, so it also
+runs in a GNOME on Xorg session. `./install.sh --x11` is still accepted for
+compatibility but is no longer required.
 
 ### Remove
 
@@ -91,6 +88,12 @@ publishes only this to `$XDG_RUNTIME_DIR/daymark/state.json`:
 
 It never reads window titles, keystrokes, clipboard data, screenshots or
 application content. There is no networking code.
+
+GNOME Shell's own surfaces are filtered out: the `gjs` host processes
+(notifications, screen saver), the desktop-icons window, docks and other
+non-application window types are never recorded as apps. A one-time migration on
+first launch also merges old fallback rows into their real desktop entries and
+removes shell-internal rows.
 
 The Rust tracker reads that small file every two seconds. It records
 non-overlapping intervals in SQLite, closes them on focus change, idle, lock,
@@ -140,25 +143,34 @@ and is checkpointed normally.
 ## Implementation notes
 
 - Rust 2024, Slint 1.8 with the **software renderer** (no WebView, no Node, no
-  browser engine, no GPU requirement), SQLite through `rusqlite` linked to the
-  system SQLite, and a 4-thread process (UI, tracker, IPC, clipboard helper).
-- The system's Ubuntu Sans and installed PNG application icons are used. SVG- or
-  missing-icon applications fall back to a quiet colored initial tile.
-- Slint is pinned to 1.8 on purpose. Slint 1.18's Parley/ICU text stack plus
-  its image/SVG dependencies made even a minimal build about 10 MB; 1.8 keeps
-  the full dashboard well under 5 MB without giving up the design.
+  browser engine, no GPU requirement) and SQLite compiled into the binary
+  through `rusqlite`/`libsqlite3-sys`. The invisible background process is three
+  threads (main, tracker, IPC); showing the window adds the Slint and
+  accessibility threads.
+- The system's Ubuntu Sans and installed application icons are used. Both PNG
+  and SVG icons are supported; raster icons are downscaled once to the size the
+  tile needs instead of keeping multi-megabyte originals in memory.
+- Slint 1.8 is pinned on purpose. Slint 1.18's Parley/ICU text stack plus its
+  image/SVG dependencies made even a minimal build about 10 MB, and the 1.8
+  backport in `vendor/` is what makes the frameless title bar draggable on
+  Wayland.
 - Slint 1.8 does not expose the native window-move hook used by later versions'
   `WindowMoveArea`. A tiny local backport in `vendor/` adds
-  `Window::start_window_move()` and wires it to winit's `drag_window()`; the
-  rest of the vendored source is upstream with warning-only cleanups. This is
-  what makes the frameless custom title bar draggable on Wayland while keeping
-  the small Slint build.
+  `Window::start_window_move()` and wires it to winit's `drag_window()`. It also
+  sets the Wayland `app_id`/X11 `WM_CLASS` to `daymark` (so GNOME matches the
+  window to the desktop entry) and provides `hide_without_quitting()`, which is
+  what lets “close” keep tracking instead of terminating the process.
+- Accessibility (AccessKit) is enabled, so the interface exposes roles, names
+  and labels to assistive technology.
 - The search icon is a small embedded raster because the software renderer does
   not implement `Path` drawing (it is used only as a tinted 16px asset).
-- SQLite is linked dynamically to the copy every Ubuntu desktop already has,
-  rather than embedding a second copy.
+- SQLite is compiled in, so the build does not need a separate
+  `libsqlite3-dev` package and Daymark always runs against the SQLite version it
+  was built and tested with.
 - One local Unix socket plus `flock` provides single-instance behavior; a second
-  launch shows the existing window instead of starting another tracker.
+  launch shows the existing window instead of starting another tracker. In
+  `--background` mode no window or event loop exists at all until it is asked
+  for.
 
 ## Measured results
 
@@ -166,67 +178,75 @@ Measured on Ubuntu 26.04, GNOME Shell 50.1, Wayland, x86_64, release build:
 
 | Item | Result |
 | --- | ---: |
-| Stripped executable | **4,722,784 bytes (4.50 MiB)** |
-| Installed application files (binary, icon, entries, extension) | ≈ 4.74 MB |
+| Stripped executable | **8,826,352 bytes (8.42 MiB)** |
+| Installed application files (binary, icon, entries, extension) | ≈ 8.85 MB |
 | Fresh database | 4 KB |
-| Hidden RSS | ≈ 17 MB |
-| Hidden CPU, 20 s sample | 0.10% (2 ticks at 100 Hz) |
-| Hidden wakeups | ≈ 1.4/s |
-| Visible RSS (pre-chrome sample) | ≈ 36 MB |
-| Visible CPU (pre-chrome sample) | 0.23% |
-| Visible wakeups | ≈ 12/s |
+| Hidden RSS | ≈ 8.2 MB |
+| Hidden CPU, 20 s sample | 0.0% (0 ticks at 100 Hz) |
+| Hidden wakeups | 0/s (blocked on IPC) |
+| Visible RSS | ≈ 27 MB |
+| Visible CPU, 10 s sample | 0.0% |
+| Visible wakeups | ≈ 1.4/s |
+| Threads | 3 hidden / 7 visible |
 
 CPU is from `/proc/<pid>/stat` (`utime+stime` ticks / 100 Hz / interval); RSS
-from `/proc/<pid>/status`; samples were taken after a 5–15 second settle.
-Wakeups are voluntary context switches per second. Dynamic dependencies:
-`libsqlite3.so.0`, `libc`, `libm`, `libgcc_s`; the GNOME/Wayland libraries are
-already part of the desktop session. The default binary is Wayland-only; the
-optional X11 backend adds code and is not included in these measurements.
+from `/proc/<pid>/status`; samples were taken after a 4 second settle. Wakeups
+are voluntary context switches per second. Dynamic dependencies:
+`libc`, `libm`, `libgcc_s`; the GNOME/Wayland libraries are already part of the
+desktop session. SQLite is compiled in. The binary sits below the intended
+10 MB budget; that budget paid for SVG icons, AccessKit accessibility and the
+X11 backend.
 
 ## Verification
 
-- `cargo test --lib`: **34 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **38 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, idle-gap exclusion, per-app totals,
-  averages, JSON parsing, desktop-entry parsing, SQLite persistence, corruption
+  averages, JSON parsing (including the seconds/milliseconds compatibility
+  path), desktop-entry parsing (quoted `Exec`, `NoDisplay`, hidden entries),
+  shell-window filtering, SQLite persistence, legacy-row migration, corruption
   recovery, crash recovery, at-most-one-open-session, pruning, settings, single
   instance, and tracker focus/pause/idle behavior.
-- The real release binary was launched on the live GNOME 50.1 Wayland session
-  (hidden and visible), with a second instance proving single-instance
-  forwarding, `--quit` shutdown, autostart creation, and database initialization.
-- The custom frameless chrome, native drag hook, resize border, minimize,
-  maximize and close callbacks compile against the patched winit/Slint path.
-  Interactive drag/resize was not exercised in the headless visual harness.
-- An end-to-end run fed the real tracker a synthetic extension state file; two
-  focus intervals were written and idle truncation applied.
+- The release binary was run on the live GNOME 50.1 Wayland session. The window
+  now reaches GNOME with `app_id`/WM class `daymark`: the companion reports the
+  focused window as `daymark.desktop` with the Daymark icon and name instead of
+  an “Unknown” window-backed app.
+- `--background` was verified to create no window and no Slint event loop, with
+  ≈ 8.2 MB RSS, 0% CPU and 0 wakeups/s over a 20 second sample; `--quit` stops
+  it cleanly and a second launch shows the existing (headless) instance.
+- The one-time migration ran on the live database (with a backup copy taken
+  first): the `gjs` row and its sessions were removed and the
+  `wm_class:com.t3tools.t3code` fallback row was merged into
+  `com.t3tools.T3Code.desktop`, keeping its icon and session duration.
+- Interactive drag/resize, close-to-background and maximize round-trips were
+  verified by code path and single-instance tests; drag/resize itself was not
+  exercised by an automated pointer on Wayland.
 - The companion was loaded by a headless GNOME Shell 50.1 session: it created
   the state file, advanced its heartbeat, honored a 30-second idle threshold,
   reported `away`, and shut down cleanly. Active-window focus transitions could
   not be exercised in that headless seat (no focused window exists), so the
-  final focus switch awaits the user's first real login with the extension
-  active. The same Mutter `focus_window`/`Shell.WindowTracker` API is used by
-  the already-working screen-time extension on this machine.
-- Visual states (light, dark, populated, empty, first-run setup, history,
+  final focus switch awaits the user's first real login with the new extension.
+- Visual states (light, dark, populated, empty, first run, setup, history,
   settings, error, and focused search) were rendered through the application's
-  own software renderer with deterministic data at 1120×780 and 900×620 and
-  inspected. GNOME's screenshot
-  D-Bus API denied external capture in this session, so the images in `docs/`
-  are true renderer output rather than compositor grabs.
+  own software renderer at 1120×780 and 900×620 and inspected. Snapshots are
+  now written opaque, so the images in `docs/` display correctly in browsers
+  and Markdown viewers.
 
 ## Known limitations
 
 - **Wayland focus tracking needs the GNOME companion and one logout/login after
   installation.** This is a GNOME extension-loading rule, not a Daymark
   workaround; the app says so in its setup flow. Locked/suspended periods are
-  intentionally not counted.
-- The default binary is Wayland-only for size. Use `--features x11` on an Xorg
-  session. Lock and suspend handling is implemented against GNOME's screen
-  shield and logind signals; only the idle path was exercised in the headless
-  integration test and a live lock/unlock was not possible here.
-- Slint 1.8's size-optimized build does not expose screen-reader tree metadata.
-  Contrast, large targets, and keyboard shortcuts are provided; screen-reader
-  support would require a larger accessibility-enabled UI build.
-- SVG-only application icons fall back to a colored initial because no SVG
-  renderer is bundled. Most Ubuntu apps ship PNG icons and render normally.
+  intentionally not counted. Updating an already-loaded extension also needs a
+  re-login before GNOME executes the new file.
+- GNOME Shell surfaces are filtered, but a future Shell version could introduce
+  a new internal surface type; the app also keeps a small deny-list as a second
+  line of defence.
+- Lock and suspend handling is implemented against GNOME's screen shield and
+  logind signals; only the idle path was exercised in the headless integration
+  test and a live lock/unlock was not possible here.
+- Accessibility exposes roles and labels (AccessKit), not a hand-tuned
+  screen-reader reading order. Contrast, large targets and full keyboard
+  shortcuts are provided.
 - If the GNOME companion stops reporting, Daymark stops recording rather than
   guessing; the dashboard explains this and links to setup again.
 
@@ -254,10 +274,12 @@ To regenerate the screenshots:
 
 ```bash
 cargo build --bin render
-./target/debug/render --out docs/daymark-light.png --state light
-./target/debug/render --out docs/daymark-dark.png --state dark
-./target/debug/render --out docs/daymark-history.png --state history
-./target/debug/render --out docs/daymark-settings.png --state settings
+./target/release/render --out docs/daymark-light.png --state light
+./target/release/render --out docs/daymark-dark.png --state dark
+./target/release/render --out docs/daymark-history.png --state history
+./target/release/render --out docs/daymark-settings.png --state light-settings
+./target/release/render --out docs/daymark-setup.png --state setup
+./target/release/render --out docs/daymark-first-run.png --state empty-banner
 ```
 
 ## License

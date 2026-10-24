@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone, Debug)]
 pub struct AppInfo {
@@ -385,6 +385,69 @@ impl Store {
     }
 }
 
+/// One-time repair of rows written before identity resolution was fixed.
+///
+/// Older builds stored unresolved fallbacks such as `wmclass:gjs` or
+/// `wmclass:com.t3tools.t3code` alongside the real application. Re-resolve
+/// those rows now, move their sessions to the real desktop entry and delete
+/// shell-internal identities so the journal never shows a `gjs` app again.
+pub fn migrate_legacy_identities(store: &Store) {
+    let version: i64 = match store
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+    {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if version >= 2 {
+        return;
+    }
+    let index = crate::desktop::DesktopIndex::load();
+    let rows: Vec<(i64, String, String, Option<String>)> = {
+        let Ok(mut stmt) = store
+            .conn
+            .prepare("SELECT id, key, name, wm_class FROM apps")
+        else {
+            return;
+        };
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    };
+    let now = crate::date::unix_now();
+    let _ = store.conn.execute_batch("BEGIN IMMEDIATE");
+    for (id, key, name, wm_class) in rows {
+        if !(key.starts_with("wmclass:") || key.starts_with("app:")) {
+            continue;
+        }
+        let class = wm_class
+            .clone()
+            .or_else(|| key.strip_prefix("wmclass:").map(str::to_string));
+        if crate::desktop::is_internal_window(class.as_deref(), Some(&name)) {
+            // Shell-internal time is not application usage. Cascades sessions.
+            let _ = store.conn.execute("DELETE FROM apps WHERE id = ?1", [id]);
+            continue;
+        }
+        let resolved = index.resolve(&key, class.as_deref(), Some(&name));
+        if !resolved.matched || resolved.key == key {
+            continue;
+        }
+        if let Ok(target) = store.upsert_app(&resolved, now) {
+            if target != id {
+                let _ = store.conn.execute(
+                    "UPDATE sessions SET app_id = ?1 WHERE app_id = ?2",
+                    rusqlite::params![target, id],
+                );
+                let _ = store.conn.execute("DELETE FROM apps WHERE id = ?1", [id]);
+            }
+        }
+    }
+    let _ = store.conn.execute_batch("COMMIT");
+    let _ = store.conn.execute_batch("PRAGMA user_version = 2");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +585,31 @@ mod tests {
         let removed = store.prune_before(today.add_days(-30).start_ts()).unwrap();
         assert_eq!(removed, 1);
         assert_eq!(store.session_count(), 1);
+    }
+
+    #[test]
+    fn migration_removes_shell_internal_rows() {
+        let dir = TempDir::new("migrate");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let internal = ResolvedApp {
+            key: "wmclass:gjs".into(),
+            name: "gjs".into(),
+            icon: None,
+            desktop_id: None,
+            wm_class: Some("gjs".into()),
+            matched: false,
+        };
+        let id = store.upsert_app(&internal, today.start_ts()).unwrap();
+        let session = store.open_session(id, today.start_ts() + 10).unwrap();
+        store.close_session(session, today.start_ts() + 50).unwrap();
+        migrate_legacy_identities(&store);
+        assert_eq!(store.session_count(), 0);
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
     }
 
     #[test]

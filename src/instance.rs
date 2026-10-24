@@ -7,8 +7,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::db;
@@ -91,11 +91,14 @@ impl InstanceGuard {
     }
 
     /// Start the IPC listener. It only sets an atomic command; the UI thread
-    /// consumes it, so no Slint types ever cross the thread boundary.
+    /// consumes it, so no Slint types ever cross the thread boundary. When a
+    /// `waker` is provided (the invisible background process), the listener
+    /// unparks that thread so it reacts immediately instead of polling.
     pub fn listen(
         &self,
         shutting_down: Arc<AtomicBool>,
         command: Arc<AtomicU8>,
+        waker: Option<Arc<Mutex<Option<std::thread::Thread>>>>,
     ) -> Result<(), String> {
         let listener = self
             .listener
@@ -119,9 +122,25 @@ impl InstanceGuard {
                     match text.trim() {
                         "quit" => {
                             command.store(COMMAND_QUIT, Ordering::SeqCst);
+                            if let Some(waker) = &waker {
+                                if let Ok(slot) = waker.lock() {
+                                    if let Some(thread) = slot.as_ref() {
+                                        thread.unpark();
+                                    }
+                                }
+                            }
                             break;
                         }
-                        "show" => command.store(COMMAND_SHOW, Ordering::SeqCst),
+                        "show" => {
+                            command.store(COMMAND_SHOW, Ordering::SeqCst);
+                            if let Some(waker) = &waker {
+                                if let Ok(slot) = waker.lock() {
+                                    if let Some(thread) = slot.as_ref() {
+                                        thread.unpark();
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -154,7 +173,7 @@ mod tests {
         let guard = InstanceGuard::acquire().unwrap().unwrap();
         let command = Arc::new(AtomicU8::new(COMMAND_NONE));
         guard
-            .listen(Arc::new(AtomicBool::new(false)), command.clone())
+            .listen(Arc::new(AtomicBool::new(false)), command.clone(), None)
             .unwrap();
         assert!(send("show"));
         std::thread::sleep(Duration::from_millis(150));

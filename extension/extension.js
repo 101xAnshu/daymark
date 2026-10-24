@@ -7,12 +7,13 @@
 
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
+import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as LoginManager from 'resource:///org/gnome/shell/misc/loginManager.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
 const DEFAULT_IDLE_SECONDS = 300;
 const HEARTBEAT_SECONDS = 15;
 const IDLE_RECHECK_SECONDS = 60;
@@ -247,7 +248,7 @@ export default class DaymarkExtension extends Extension {
         let focus = null;
         try {
             const win = global.display.focus_window;
-            if (win) {
+            if (win && !this._is_shell_surface(win)) {
                 const app = Shell.WindowTracker.get_default().get_window_app(win);
                 if (app) {
                     let id = app.get_id();
@@ -275,6 +276,32 @@ export default class DaymarkExtension extends Extension {
             focus = null;
         }
         this._focus = focus;
+    }
+
+    // Mutter can hand us GNOME Shell's own surfaces: the desktop-icons window,
+    // notification bubbles, the screen shield, docks and menus. They are all
+    // hosted by gjs or gnome-shell and must never be recorded as applications.
+    _is_shell_surface(win) {
+        try {
+            const type = win.get_window_type?.();
+            if (type !== undefined && type !== null) {
+                const allowed = [
+                    Meta.WindowType.NORMAL,
+                    Meta.WindowType.DIALOG,
+                    Meta.WindowType.MODAL_DIALOG,
+                    Meta.WindowType.UTILITY,
+                ];
+                if (!allowed.includes(type))
+                    return true;
+            }
+            const wmClass = (win.get_wm_class() || '').toLowerCase();
+            if (['gjs', 'gnome-shell', 'gnome-shell-extension', 'ding'].includes(wmClass))
+                return true;
+        } catch (e) {
+            // A transient/override-redirect window can throw here; ignoring it
+            // is safer than recording an unknown identity.
+        }
+        return false;
     }
 
     _isLocked() {
@@ -321,7 +348,7 @@ export default class DaymarkExtension extends Extension {
             stamp: Date.now(),
             focus: this._focus,
             away: away,
-            away_since: away ? (this._awaySince || Date.now()) : 0,
+            away_since: away ? Math.floor((this._awaySince || Date.now()) / 1000) : 0,
             idle: this._idle,
             locked: this._isLocked(),
             inhibited: this._inhibited,
