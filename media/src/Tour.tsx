@@ -131,17 +131,19 @@ const AppWindow: React.FC<WindowProps> = ({
 
 const Intro: React.FC = () => {
   const f = useCurrentFrame();
-  const opacity = envelope(f, 0, 18, 94, 18);
-  const iconScale = interpolate(f, [0, 26], [0.84, 1], {
+  // The first frame is a complete title card, so the README GIF starts on a
+  // finished image instead of a blank cream frame. Motion begins from there.
+  const opacity = leave(f, 94, 18);
+  const iconScale = interpolate(f, [0, 30], [0.92, 1], {
     ...clamp,
     easing: ease,
   });
-  const iconOpacity = enter(f, 0, 16);
-  const word = enter(f, 7, 24);
-  const wordY = interpolate(f, [7, 31], [26, 0], { ...clamp, easing: ease });
-  const rule = enter(f, 20, 24);
-  const tag = enter(f, 26, 22);
-  const tagY = interpolate(f, [26, 48], [14, 0], { ...clamp, easing: ease });
+  const iconOpacity = 1;
+  const word = 1;
+  const wordY = 0;
+  const rule = 1;
+  const tag = 1;
+  const tagY = interpolate(f, [6, 34], [12, 0], { ...clamp, easing: ease });
 
   return (
     <CreamBackdrop>
