@@ -27,13 +27,13 @@
 
 <p align="center">
   <a href="docs/media/daymark-tour.mp4">
-    <img src="docs/media/daymark-tour.gif" width="820"
-         alt="A short tour: the Daymark dashboard, the application breakdown, local-only privacy, history and settings" />
+    <img src="docs/media/daymark-tour.gif" width="720"
+         alt="A 26 second tour of Daymark: the dashboard, the application breakdown and search, local-only privacy, and the history view" />
   </a>
 </p>
 
 <p align="center">
-  <sub>22-second tour · <a href="docs/media/daymark-tour.mp4">MP4 version</a></sub>
+  <sub>26-second tour · <a href="docs/media/daymark-tour.mp4">60 fps MP4 with sound</a></sub>
 </p>
 
 One day at a time. Daymark shows how long you used the computer, where the time
@@ -270,9 +270,11 @@ vendor/               small Slint 1.8 backports (window identity, drag, hide)
 
 ### Media
 
-The tour is generated from the real rendered UI with
-[Remotion](https://www.remotion.dev/). The project and its sources live in
-[`media/`](media/), and the README GIF is a downscaled version of the 1080p MP4:
+The tour is a 60 fps [Remotion](https://www.remotion.dev/) composition that
+rebuilds the interface from the same design tokens and application icons, so the
+numbers, bars, search and rows can move. It has an original ambient score. The
+project lives in [`media/`](media/); the README GIF is a downscaled version of
+the 1080p MP4:
 
 ```bash
 cd media

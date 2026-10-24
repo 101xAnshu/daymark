@@ -1,15 +1,15 @@
 # Tour media
 
-The README tour is rendered with [Remotion](https://www.remotion.dev/) from the
-real UI screenshots in `public/`.
+The README tour is a 26 second, 60 fps Remotion composition that rebuilds the
+Daymark interface from its design tokens and real application icons, so the
+numbers, bars, search and rows can animate.
 
-Regenerate after a UI change:
+- `src/Tour.tsx` — the composition
+- `public/apps/` — application icons used in the app list
+- `public/score.m4a` — the original ambient score (`score.py` regenerates it)
+- `render.sh` — renders the 1080p MP4 with sound, then the 720 px README GIF
 
-1. Render fresh screenshots (see the main README) and copy them here:
-   `docs/daymark-light.png` → `public/dashboard.png`,
-   `docs/daymark-history.png` → `public/history.png`,
-   `docs/daymark-settings.png` → `public/settings.png`.
-2. `npm install`
-3. `./render.sh`
-
-`render.sh` writes the 1080p MP4 and a 15 fps, 800 px GIF to `../docs/media/`.
+```bash
+npm install
+./render.sh
+```

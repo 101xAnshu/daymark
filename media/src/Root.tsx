@@ -6,8 +6,8 @@ export const RemotionRoot = () => {
     <Composition
       id="DaymarkTour"
       component={DaymarkTour}
-      durationInFrames={660}
-      fps={30}
+      durationInFrames={1560}
+      fps={60}
       width={1920}
       height={1080}
     />
