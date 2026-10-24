@@ -1105,7 +1105,7 @@ export component AppWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             width: 468px;
-            height: min(600px, parent.height - 24px);
+            height: min(settings-content.preferred-height, parent.height - 24px);
             border-radius: Theme.radius-lg;
             background: Theme.surface;
             border-width: 1px;
@@ -1113,10 +1113,11 @@ export component AppWindow inherits Window {
             clip: true;
             TouchArea { clicked => { } }
 
-            VerticalLayout {
+            settings-content := VerticalLayout {
                 padding: 26px;
                 padding-top: 22px;
                 spacing: 0;
+                alignment: start;
 
                 HorizontalLayout {
                     
@@ -1140,11 +1141,11 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Rectangle { height: 18px; background: transparent; }
+                Rectangle { height: 14px; background: transparent; }
 
                 // Tracking status
                 Rectangle {
-                    height: 58px;
+                    height: 56px;
                     border-radius: 10px;
                     background: Theme.surface-muted;
                     border-width: 1px;
@@ -1162,7 +1163,7 @@ export component AppWindow inherits Window {
                     }
                     HorizontalLayout {
                         width: 100%;
-                        height: 58px;
+                        height: 56px;
                         padding-left: 30px;
                         padding-right: 12px;
                         padding-top: 12px;
@@ -1201,9 +1202,9 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Rectangle { height: 18px; background: transparent; }
+                Rectangle { height: 12px; background: transparent; }
                 Hairline { }
-                Rectangle { height: 16px; background: transparent; }
+                Rectangle { height: 12px; background: transparent; }
 
                 Text {
                     text: "Idle timeout";
@@ -1251,7 +1252,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Rectangle { height: 18px; background: transparent; }
+                Rectangle { height: 14px; background: transparent; }
                 Text {
                     text: "Keep history";
                     font-size: Theme.body-size;
@@ -1281,7 +1282,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Rectangle { height: 18px; background: transparent; }
+                Rectangle { height: 14px; background: transparent; }
                 Text {
                     text: "Appearance";
                     font-size: Theme.body-size;
@@ -1338,7 +1339,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Rectangle { height: 7px; background: transparent; }
+                Rectangle { height: 6px; background: transparent; }
                 data-row := Rectangle {
                     height: 32px;
                     border-radius: 7px;
@@ -1361,20 +1362,24 @@ export component AppWindow inherits Window {
                 if (root.settings-error != "") : Rectangle {
                         height: 32px;
                         Text {
+                            x: 8px;
+                            y: 0px;
+                            width: parent.width - 16px;
+                            height: parent.height;
                             text: root.settings-error;
                             font-size: Theme.micro-size;
                             color: Theme.danger;
                             wrap: word-wrap;
+                            horizontal-alignment: left;
                             vertical-alignment: center;
                         }
                     }
 
-                Rectangle { height: 7px; background: transparent; }
-                delete-row := Rectangle {
+                Rectangle { height: 6px; background: transparent; }
+                if (!root.confirm-delete) : Rectangle {
                     height: 32px;
                     border-radius: 7px;
                     background: delete-touch.has-hover ? Theme.hover : transparent;
-                    visible: !root.confirm-delete;
                     Text {
                         x: 8px;
                         y: 0px;
@@ -1389,11 +1394,10 @@ export component AppWindow inherits Window {
                         clicked => { root.confirm-delete = true; }
                     }
                 }
-                Rectangle {
+                if (root.confirm-delete) : Rectangle {
                     height: 54px;
                     border-radius: 8px;
                     background: Theme.surface-muted;
-                    visible: root.confirm-delete;
                     HorizontalLayout {
                         padding-left: 12px;
                         padding-right: 6px;
@@ -1419,8 +1423,6 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-
-                Rectangle { vertical-stretch: 1; }
 
                 Hairline { }
                 Rectangle { height: 10px; background: transparent; }

@@ -118,6 +118,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ctl.open_settings_for_render();
                 ctl.ui.set_confirm_delete(true);
             }
+            "settings-error" => {
+                ctl.open_settings_for_render();
+                ctl.set_external_error("Could not open the data folder.".into());
+            }
             "maximized" => ctl.ui.set_maximized(true),
             "setup" => ctl.open_setup_for_render(false),
             "setup-ready" => ctl.open_setup_for_render(true),
