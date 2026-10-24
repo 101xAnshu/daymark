@@ -1,0 +1,161 @@
+//! Headless screenshot renderer used for visual QA. Build with the normal
+//! release profile, but it is not installed with the application.
+
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+use slint::platform::{Platform, PlatformError, WindowAdapter};
+use slint::{ComponentHandle, PhysicalSize};
+
+use daymark::app::AppController;
+use daymark::db::Store;
+use daymark::settings::{Settings, ThemePref};
+use daymark::tracker::{TrackerHandle, TrackingStatus};
+use daymark::{AppWindow, Theme};
+
+struct HeadlessPlatform {
+    window: Rc<MinimalSoftwareWindow>,
+}
+
+impl Platform for HeadlessPlatform {
+    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
+        Ok(self.window.clone())
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut out = PathBuf::from("/tmp/opencode/daymark.png");
+    let mut state = "populated".to_string();
+    let mut width = 1120u32;
+    let mut height = 780u32;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => {
+                i += 1;
+                out = PathBuf::from(args.get(i).ok_or("missing --out value")?);
+            }
+            "--state" => {
+                i += 1;
+                state = args.get(i).ok_or("missing --state value")?.clone();
+            }
+            "--width" => {
+                i += 1;
+                width = args.get(i).ok_or("missing width")?.parse()?;
+            }
+            "--height" => {
+                i += 1;
+                height = args.get(i).ok_or("missing height")?.parse()?;
+            }
+            other => return Err(format!("unknown argument {other}").into()),
+        }
+        i += 1;
+    }
+
+    let db_path = std::env::temp_dir().join(format!(
+        "daymark-render-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let store = Store::open_at(&db_path)?;
+    if state != "empty" && state != "light-empty" && state != "empty-banner" {
+        daymark::demo::seed(&store);
+    }
+    let mut settings = Settings {
+        autostart: true,
+        ..Settings::default()
+    };
+    let status = TrackingStatus::Active;
+    let (handle_status, detail) =
+        if state == "setup" || state == "banner" || state == "empty-banner" {
+            (
+                TrackingStatus::NeedsSetup,
+                "GNOME integration is not installed",
+            )
+        } else {
+            (status, "Tracking Brave Web Browser")
+        };
+    if state == "dark" || state == "dark-settings" {
+        settings.theme = ThemePref::Dark;
+    }
+    if state == "light" || state == "light-settings" || state == "light-empty" {
+        settings.theme = ThemePref::Light;
+    }
+    let tracker = TrackerHandle::demo(settings.clone(), handle_status, detail);
+
+    let scale = 1.0f32;
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    window.set_size(PhysicalSize::new(
+        (width as f32 * scale) as u32,
+        (height as f32 * scale) as u32,
+    ));
+    slint::platform::set_platform(Box::new(HeadlessPlatform {
+        window: window.clone(),
+    }))
+    .ok();
+
+    let ui = AppWindow::new()?;
+    let controller = AppController::new(ui, Some(store), Some(tracker), settings, None);
+    {
+        let mut ctl = controller.borrow_mut();
+        match state.as_str() {
+            "history" => ctl.set_view_for_render(1),
+            "settings" | "dark-settings" | "light-settings" => ctl.open_settings_for_render(),
+            "setup" => ctl.open_setup_for_render(false),
+            "setup-ready" => ctl.open_setup_for_render(true),
+            "banner" => { /* the setup banner is shown automatically */ }
+            "past" => ctl.set_selected_for_render(-3),
+            "past-empty" => ctl.set_selected_for_render(-5),
+            "error" => ctl.set_load_error(
+                "The local data file could not be opened: permission denied.".into(),
+            ),
+            "light-empty" | "empty-banner" => {}
+            _ => {}
+        }
+    }
+    {
+        let ctl = controller.borrow();
+        if state == "dark" || state == "dark-settings" {
+            ctl.ui.global::<Theme>().set_dark(true);
+        }
+        ctl.ui.show()?;
+    }
+    slint::platform::update_timers_and_animations();
+    window.request_redraw();
+    slint::platform::update_timers_and_animations();
+
+    let buffer = {
+        let ctl = controller.borrow();
+        ctl.ui.window().take_snapshot()?
+    };
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    {
+        let file = std::io::BufWriter::new(std::fs::File::create(&out)?);
+        let mut encoder = png::Encoder::new(file, buffer.width(), buffer.height());
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        let mut bytes = Vec::with_capacity(buffer.as_slice().len() * 4);
+        for pixel in buffer.as_slice() {
+            bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+        }
+        writer.write_image_data(&bytes)?;
+    }
+    drop(controller);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", db_path.display()));
+    }
+    println!(
+        "wrote {} ({}×{})",
+        out.display(),
+        buffer.width(),
+        buffer.height()
+    );
+    Ok(())
+}

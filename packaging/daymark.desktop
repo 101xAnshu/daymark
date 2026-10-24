@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Daymark
+Comment=A quiet screen time journal
+Exec=/usr/bin/daymark
+TryExec=daymark
+Icon=daymark
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=daymark
+Keywords=screen time;usage;focus;activity;

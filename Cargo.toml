@@ -1,0 +1,34 @@
+[package]
+name = "daymark"
+version = "0.1.0"
+edition = "2024"
+description = "A quiet screen time journal for GNOME"
+license = "MIT"
+rust-version = "1.85"
+
+[features]
+default = []
+# Optional X11 window backend for Ubuntu GNOME on Xorg (adds about 0.7 MB).
+x11 = ["slint/backend-winit-x11"]
+
+[dependencies]
+slint = { version = "=1.8.0", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit-wayland",
+    "renderer-software",
+    "software-renderer-systemfonts",
+] }
+rusqlite = { version = "0.37", default-features = false }
+libc = "0.2"
+png = "0.18"
+
+[build-dependencies]
+slint-build = "=1.8.0"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

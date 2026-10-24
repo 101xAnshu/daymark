@@ -1,0 +1,13 @@
+slint::include_modules!();
+
+pub mod app;
+pub mod date;
+pub mod db;
+pub mod demo;
+pub mod desktop;
+pub mod instance;
+pub mod json;
+pub mod platform;
+pub mod settings;
+pub mod stats;
+pub mod tracker;

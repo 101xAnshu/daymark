@@ -1,0 +1,272 @@
+// Daymark design system: a warm neutral surface, one restrained accent and a
+// small, deliberate type scale. All screens draw from these tokens.
+
+export global Theme {
+    in property <bool> dark: false;
+
+    out property <color> bg: dark ? #161411 : #f7f3ec;
+    out property <color> surface: dark ? #1e1a16 : #fffcf6;
+    out property <color> surface-muted: dark ? #24201b : #f2ebe1;
+    out property <color> hover: dark ? #2b2620 : #efe7dc;
+    out property <color> pressed: dark ? #332d26 : #e8ded1;
+    out property <color> text: dark ? #f3eee6 : #26221d;
+    out property <color> text-secondary: dark ? #b6aa9b : #6b6258;
+    out property <color> text-tertiary: dark ? #93887a : #897e70;
+    out property <color> line: dark ? #2e2923 : #e8dfd3;
+    out property <color> line-strong: dark ? #3d362e : #d8cdbe;
+    out property <color> accent: dark ? #e09c76 : #aa5431;
+    out property <color> accent-hover: dark ? #ecb08d : #954628;
+    out property <color> accent-soft: dark ? #3a2a20 : #f3e1d5;
+    out property <color> on-accent: dark ? #23150d : #fffaf4;
+    out property <color> track: dark ? #2b2620 : #ece4d8;
+    out property <color> track-strong: dark ? #3a332b : #ded3c4;
+    out property <color> bar: dark ? #3b342c : #e6dbcc;
+    out property <color> bar-hover: dark ? #4b4237 : #dbcebc;
+    out property <color> success: dark ? #93bd9e : #4f7a5d;
+    out property <color> warning: dark ? #d8a56c : #a3682e;
+    out property <color> danger: dark ? #e29a86 : #a23f2e;
+    out property <color> tooltip-bg: dark ? #ede6dc : #2a2520;
+    out property <color> tooltip-text: dark ? #211d18 : #f8f3eb;
+    out property <color> overlay: #00000066;
+
+    out property <string> font: "Ubuntu Sans";
+    out property <string> font-numeric: "Ubuntu Sans";
+
+    out property <length> radius-sm: 7px;
+    out property <length> radius-md: 11px;
+    out property <length> radius-lg: 18px;
+    out property <length> page-pad: 40px;
+    out property <length> page-top: 24px;
+    out property <length> hero-size: 62px;
+    out property <length> body-size: 13px;
+    out property <length> small-size: 12px;
+    out property <length> micro-size: 11px;
+}
+
+export component Hairline inherits Rectangle {
+    height: 1px;
+    background: Theme.line;
+}
+
+export component Dot inherits Rectangle {
+    in property <color> tint: Theme.accent;
+    width: 6px;
+    height: 6px;
+    border-radius: 3px;
+    background: tint;
+}
+
+export component SlidersIcon inherits Rectangle {
+    width: 16px;
+    height: 16px;
+    background: transparent;
+    Rectangle { x: 1px; y: 3px; width: 14px; height: 1.5px; background: Theme.text-secondary; }
+    Rectangle { x: 1px; y: 7.5px; width: 14px; height: 1.5px; background: Theme.text-secondary; }
+    Rectangle { x: 1px; y: 12px; width: 14px; height: 1.5px; background: Theme.text-secondary; }
+    Rectangle { x: 4px; y: 1.5px; width: 4px; height: 4px; border-radius: 2px; background: Theme.bg; border-width: 1.5px; border-color: Theme.text-secondary; }
+    Rectangle { x: 10px; y: 6px; width: 4px; height: 4px; border-radius: 2px; background: Theme.bg; border-width: 1.5px; border-color: Theme.text-secondary; }
+    Rectangle { x: 3px; y: 10.5px; width: 4px; height: 4px; border-radius: 2px; background: Theme.bg; border-width: 1.5px; border-color: Theme.text-secondary; }
+}
+
+export component CloseIcon inherits Rectangle {
+    width: 14px;
+    height: 14px;
+    background: transparent;
+    Text {
+        text: "×";
+        font-size: 19px;
+        font-weight: 500;
+        color: Theme.text-secondary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        y: -1px;
+    }
+}
+
+export component SearchIcon inherits Rectangle {
+    width: 14px;
+    height: 14px;
+    background: transparent;
+    Rectangle {
+        x: 0.75px;
+        y: 0.75px;
+        width: 8.5px;
+        height: 8.5px;
+        border-radius: 5px;
+        border-width: 1.5px;
+        border-color: Theme.text-tertiary;
+        background: transparent;
+    }
+    Path {
+        commands: "M 9 10 L 12.5 13.5";
+        stroke: Theme.text-tertiary;
+        stroke-width: 1.5px;
+        fill: transparent;
+    }
+}
+
+export component Chevron inherits Rectangle {
+    in property <bool> left: false;
+    in property <bool> enabled: true;
+    in property <color> tint: Theme.text-secondary;
+    width: 30px;
+    height: 30px;
+    border-radius: 15px;
+    background: touch.has-hover && enabled ? Theme.hover : transparent;
+    animate background { duration: 120ms; }
+    Text {
+        text: left ? "‹" : "›";
+        font-size: 20px;
+        font-weight: 500;
+        color: enabled ? tint : Theme.text-tertiary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        y: -2px;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    callback clicked;
+}
+
+export component Switch inherits Rectangle {
+    in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    width: 38px;
+    height: 22px;
+    border-radius: 11px;
+    background: !enabled ? Theme.track : checked ? Theme.accent : Theme.track-strong;
+    animate background { duration: 150ms; }
+    Rectangle {
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        x: checked ? root.width - 20px : 2px;
+        y: 2px;
+        background: enabled ? (Theme.dark ? #f7f2ea : #fffdf9) : Theme.track;
+        animate x { duration: 150ms; easing: ease-in-out; }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            if (root.enabled) {
+                root.checked = !root.checked;
+                root.toggled(root.checked);
+            }
+        }
+    }
+}
+
+export component Chip inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    callback clicked;
+    height: 30px;
+    border-radius: 8px;
+    background: selected ? Theme.accent-soft : touch.has-hover ? Theme.hover : transparent;
+    border-width: 1px;
+    border-color: selected ? Theme.accent-soft : Theme.line;
+    animate background { duration: 120ms; }
+    HorizontalLayout {
+        alignment: center;
+        padding-left: 12px;
+        padding-right: 12px;
+        Text {
+            text: root.label;
+            font-size: Theme.small-size;
+            font-weight: selected ? 600 : 500;
+            color: selected ? Theme.accent : Theme.text-secondary;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component TextButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <color> tint: Theme.text-secondary;
+    in property <bool> danger: false;
+    callback clicked;
+    height: 30px;
+    border-radius: 7px;
+    background: touch.has-hover && enabled ? Theme.hover : transparent;
+    animate background { duration: 120ms; }
+    HorizontalLayout {
+        alignment: center;
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: root.label;
+            font-size: Theme.small-size;
+            font-weight: 500;
+            color: root.danger ? (root.enabled ? Theme.danger : Theme.text-tertiary) : (root.enabled ? root.tint : Theme.text-tertiary);
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component PrimaryButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 34px;
+    border-radius: 9px;
+    background: !root.enabled ? Theme.track : touch.pressed ? Theme.accent-hover : Theme.accent;
+    animate background { duration: 120ms; }
+    HorizontalLayout {
+        alignment: center;
+        padding-left: 16px;
+        padding-right: 16px;
+        Text {
+            text: root.label;
+            font-size: Theme.small-size;
+            font-weight: 600;
+            color: Theme.on-accent;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component EmptyMark inherits Rectangle {
+    width: 38px;
+    height: 38px;
+    border-radius: 19px;
+    background: Theme.surface-muted;
+    Rectangle {
+        x: 11px;
+        y: 16px;
+        width: 16px;
+        height: 8px;
+        clip: true;
+        background: transparent;
+        Rectangle {
+            width: 16px;
+            height: 16px;
+            border-radius: 8px;
+            background: Theme.bar-hover;
+        }
+    }
+    Rectangle {
+        width: 18px;
+        height: 1.5px;
+        background: Theme.bar-hover;
+        x: 10px;
+        y: 26px;
+    }
+}

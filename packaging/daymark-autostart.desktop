@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Daymark
+Comment=Local screen time tracking
+Exec=/usr/bin/daymark --background
+TryExec=daymark
+Icon=daymark
+Terminal=false
+StartupNotify=false
+Categories=Utility;
+X-GNOME-Autostart-enabled=true

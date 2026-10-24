@@ -1,0 +1,1500 @@
+export { Theme } from "theme.slint";
+import { Theme, Hairline, Dot, SlidersIcon, CloseIcon, SearchIcon, Chevron, Switch, Chip, TextButton, PrimaryButton, EmptyMark } from "theme.slint";
+
+export struct AppRow {
+    name: string,
+    duration: string,
+    ratio: float,
+    initial: string,
+    has-icon: bool,
+    icon: image,
+    tint: color,
+}
+
+export struct DayBar {
+    label: string,
+    date-label: string,
+    value: string,
+    ratio: float,
+    selected: bool,
+    is-today: bool,
+    offset: int,
+}
+
+export struct HourBar {
+    ratio: float,
+}
+
+export struct HistoryRow {
+    label: string,
+    date: string,
+    duration: string,
+    ratio: float,
+    is-today: bool,
+    offset: int,
+}
+
+export component AppWindow inherits Window {
+    title: "Daymark";
+    preferred-width: 1120px;
+    preferred-height: 780px;
+    min-width: 900px;
+    min-height: 620px;
+    background: Theme.bg;
+    default-font-family: Theme.font;
+    default-font-size: 13px;
+    forward-focus: key-root;
+
+    // --- Data -------------------------------------------------------------
+    in property <int> view: 0; // 0 = day, 1 = history
+    in property <int> selected-offset: 0;
+    in property <string> date-kicker: "";
+    in property <string> total-text: "0m";
+    in property <string> compare-text: "";
+    in property <bool> has-data: false;
+    in property <bool> has-any-data: false;
+    in property <string> week-label: "Last 7 days";
+    in property <string> week-total-text: "";
+    in property <[DayBar]> week: [];
+    in property <[AppRow]> apps: [];
+    in property <string> apps-caption: "";
+    in property <string> peak-text: "";
+    in property <[HourBar]> hours: [];
+    in property <string> history-total: "0m";
+    in property <string> history-summary: "";
+    in property <[HistoryRow]> history: [];
+    in property <bool> has-history: false;
+    in-out property <string> search-text: "";
+    in property <string> load-error: "";
+
+    // --- Tracking / settings state ---------------------------------------
+    in property <int> tracking-code: 3;
+    in property <string> tracking-title: "Tracking needs setup";
+    in property <string> tracking-detail: "";
+    in property <bool> show-banner: false;
+    in property <string> banner-title: "";
+    in property <string> banner-body: "";
+    in property <string> banner-action: "";
+    in property <int> banner-kind: 0; // 0 setup, 1 resume, 2 retry, 3 details
+    in property <bool> paused: false;
+    in property <bool> settings-open: false;
+    in property <bool> setup-open: false;
+    in property <bool> setup-ready: false;
+    in property <bool> is-wayland: true;
+    in property <int> idle-seconds: 300;
+    in property <int> retention-days: 365;
+    in property <int> theme-pref: 0;
+    in property <bool> autostart: false;
+    in property <string> settings-error: "";
+    in property <string> app-version: "0.1.0";
+    in property <bool> recovered: false;
+
+    in-out property <bool> confirm-delete: false;
+
+    // --- Actions ----------------------------------------------------------
+    callback nav-day(int);
+    callback go-today();
+    callback select-day(int);
+    callback set-view(int);
+    callback open-settings();
+    callback close-settings();
+    callback open-setup();
+    callback close-setup();
+    callback setup-tracking();
+    callback resume-tracking();
+    callback retry();
+    callback set-idle(int);
+    callback set-retention(int);
+    callback set-theme(int);
+    callback set-autostart(bool);
+    callback set-paused(bool);
+    callback search-changed(string);
+    callback open-data();
+    callback delete-all();
+    callback cancel-delete();
+    callback quit();
+    callback hide-window();
+    callback toggle-maximize();
+
+    key-root := FocusScope {
+        width: 100%;
+        height: 100%;
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (root.settings-open) {
+                if (event.text == "\u{1b}") {
+                    root.close-settings();
+                    return accept;
+                }
+                return reject;
+            }
+            if (root.setup-open) {
+                if (event.text == "\u{1b}") {
+                    root.close-setup();
+                    return accept;
+                }
+                return reject;
+            }
+            if (event.modifiers.control && (event.text == "q" || event.text == "Q")) {
+                root.quit();
+                return accept;
+            }
+            if (event.modifiers.control && (event.text == "w" || event.text == "W")) {
+                root.hide-window();
+                return accept;
+            }
+            if (event.modifiers.control && event.text == ",") {
+                root.open-settings();
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "1") {
+                root.set-view(0);
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "2") {
+                root.set-view(1);
+                return accept;
+            }
+            if (event.text == "\u{1b}") {
+                if (root.search-text != "") {
+                    root.search-text = "";
+                    root.search-changed("");
+                    return accept;
+                }
+                return reject;
+            }
+            if (event.text == "ArrowLeft" && root.view == 0) {
+                root.nav-day(-1);
+                return accept;
+            }
+            if (event.text == "ArrowRight" && root.view == 0) {
+                root.nav-day(1);
+                return accept;
+            }
+            if (event.text == "t" || event.text == "T") {
+                if (!event.modifiers.control && !event.modifiers.alt) {
+                    root.go-today();
+                    return accept;
+                }
+            }
+            return reject;
+        }
+
+        VerticalLayout {
+            width: 100%;
+            height: 100%;
+            // ---- Header -------------------------------------------------
+            Rectangle {
+                height: 64px;
+                background: Theme.bg;
+
+                TouchArea {
+                    double-clicked => { root.toggle-maximize(); }
+                }
+
+                VerticalLayout {
+                    width: 100%;
+                    height: 100%;
+                    alignment: center;
+                HorizontalLayout {
+                    width: 100%;
+                    padding-left: Theme.page-pad;
+                    padding-right: Theme.page-pad;
+                    spacing: 12px;
+
+                    HorizontalLayout {
+                        horizontal-stretch: 0;
+                        spacing: 10px;
+                        alignment: center;
+                        // A quiet sunrise mark, drawn rather than borrowed.
+                        Rectangle {
+                            width: 20px;
+                            height: 15px;
+                            background: transparent;
+                            Rectangle {
+                                x: 2px;
+                                y: 0px;
+                                width: 16px;
+                                height: 8px;
+                                clip: true;
+                                background: transparent;
+                                Rectangle {
+                                    width: 16px;
+                                    height: 16px;
+                                    border-radius: 8px;
+                                    background: Theme.accent;
+                                }
+                            }
+                            Rectangle {
+                                x: 0px;
+                                y: 10px;
+                                width: 20px;
+                                height: 2px;
+                                border-radius: 1px;
+                                background: Theme.accent;
+                            }
+                            Rectangle {
+                                x: 0px;
+                                y: 14px;
+                                width: 12px;
+                                height: 1px;
+                                background: Theme.accent;
+                                opacity: 0.45;
+                            }
+                        }
+                        Text {
+                            text: "Daymark";
+                            font-size: 16px;
+                            font-weight: 600;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                            letter-spacing: 0.1px;
+                        }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    // Segmented view control
+                    Rectangle {
+                        width: 136px;
+                        height: 32px;
+                        border-radius: 9px;
+                        background: Theme.surface-muted;
+                        border-width: 1px;
+                        border-color: Theme.line;
+
+                        HorizontalLayout {
+                            padding: 3px;
+                            spacing: 2px;
+                            day-tab := Rectangle {
+                                horizontal-stretch: 1;
+                                border-radius: 6px;
+                                background: root.view == 0 ? Theme.surface : transparent;
+                                animate background { duration: 140ms; }
+                                Text {
+                                    text: "Day";
+                                    font-size: 12px;
+                                    font-weight: root.view == 0 ? 600 : 500;
+                                    color: root.view == 0 ? Theme.text : Theme.text-secondary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.set-view(0); } }
+                            }
+                            history-tab := Rectangle {
+                                horizontal-stretch: 1;
+                                border-radius: 6px;
+                                background: root.view == 1 ? Theme.surface : transparent;
+                                animate background { duration: 140ms; }
+                                Text {
+                                    text: "History";
+                                    font-size: 12px;
+                                    font-weight: root.view == 1 ? 600 : 500;
+                                    color: root.view == 1 ? Theme.text : Theme.text-secondary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.set-view(1); } }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 15px;
+                        background: settings-touch.has-hover ? Theme.hover : transparent;
+                        animate background { duration: 120ms; }
+                        SlidersIcon {
+                            x: 7px;
+                            y: 7px;
+                        }
+                        settings-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.open-settings(); }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 15px;
+                        background: close-touch.has-hover ? Theme.hover : transparent;
+                        animate background { duration: 120ms; }
+                        CloseIcon {
+                            x: 9px;
+                            y: 9px;
+                        }
+                        close-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.hide-window(); }
+                        }
+                    }
+                }
+                }
+            }
+            Hairline { }
+
+            // ---- Content ------------------------------------------------
+            Rectangle {
+                vertical-stretch: 1;
+                flick := Flickable {
+                    width: 100%;
+                    height: 100%;
+                    viewport-width: self.width;
+                    viewport-height: content.preferred-height;
+                    interactive: true;
+
+                    content := VerticalLayout {
+                        width: flick.width;
+                        padding-left: Theme.page-pad;
+                        padding-right: Theme.page-pad;
+                        padding-top: Theme.page-top;
+                        padding-bottom: 36px;
+
+                        if (root.view == 0) : VerticalLayout {
+                            // ---- Day heading ----
+                            HorizontalLayout {
+                                width: 100%;
+
+
+                                VerticalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: root.date-kicker;
+                                        font-size: Theme.micro-size;
+                                        font-weight: 600;
+                                        color: Theme.text-secondary;
+                                        letter-spacing: 1.1px;
+                                    }
+                                    Text {
+                                        text: root.total-text;
+                                        font-size: Theme.hero-size;
+                                        font-weight: 600;
+                                        color: Theme.text;
+                                        letter-spacing: -1.5px;
+                                        height: 76px;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.compare-text;
+                                        font-size: 12.5px;
+                                        color: Theme.text-secondary;
+                                        visible: root.compare-text != "";
+                                    }
+                                }
+
+                                Rectangle { horizontal-stretch: 1; }
+
+                                HorizontalLayout {
+                                    horizontal-stretch: 0;
+                                    spacing: 4px;
+                                    alignment: center;
+                                    Chevron {
+                                        left: true;
+                                        clicked => { root.nav-day(-1); }
+                                    }
+                                    if (root.selected-offset != 0) : Rectangle {
+                                        height: 28px;
+                                        border-radius: 14px;
+                                        border-width: 1px;
+                                        border-color: Theme.line-strong;
+                                        background: today-touch.has-hover ? Theme.hover : transparent;
+                                        animate background { duration: 120ms; }
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            alignment: center;
+                                            Text {
+                                                text: "Today";
+                                                font-size: 12px;
+                                                font-weight: 500;
+                                                color: Theme.text-secondary;
+                                            }
+                                        }
+                                        today-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.go-today(); }
+                                        }
+                                    }
+                                    Chevron {
+                                        enabled: root.selected-offset < 0;
+                                        clicked => { root.nav-day(1); }
+                                    }
+                                }
+                            }
+
+                            // ---- Optional tracking notice ----
+                            if (root.show-banner) : VerticalLayout {
+                                Rectangle {
+                                    height: 16px;
+                                    background: transparent;
+                                }
+                                Rectangle {
+                                    border-radius: Theme.radius-md;
+                                    background: Theme.accent-soft;
+                                    border-width: 1px;
+                                    border-color: Theme.dark ? #483326 : #ecd9cb;
+
+                                    HorizontalLayout {
+                                        padding: 14px;
+                                        padding-left: 16px;
+                                        padding-right: 12px;
+                                        spacing: 12px;
+                                        
+
+                                        Rectangle {
+                                            width: 8px;
+                                            height: 8px;
+                                            border-radius: 4px;
+                                            background: root.tracking-code == 6 ? Theme.danger : Theme.accent;
+                                        }
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            horizontal-stretch: 1;
+                                            Text {
+                                                text: root.banner-title;
+                                                font-size: 12.5px;
+                                                font-weight: 600;
+                                                color: Theme.text;
+                                            }
+                                            Text {
+                                                text: root.banner-body;
+                                                font-size: 12px;
+                                                color: Theme.text-secondary;
+                                                wrap: word-wrap;
+                                            }
+                                        }
+                                        PrimaryButton {
+                                            label: root.banner-action;
+                                            visible: root.banner-action != "";
+                                            clicked => {
+                                                if (root.banner-kind == 0) { root.setup-tracking(); }
+                                                else if (root.banner-kind == 1) { root.resume-tracking(); }
+                                                else if (root.banner-kind == 2) { root.retry(); }
+                                                else { root.open-setup(); }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ---- Weekly chart ----
+                            Rectangle {
+                                height: root.show-banner ? 30px : 18px;
+                                background: transparent;
+                            }
+
+                            HorizontalLayout {
+                                Text {
+                                    text: root.week-label;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text {
+                                    text: root.week-total-text;
+                                    font-size: 11.5px;
+                                    color: Theme.text-tertiary;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Rectangle { height: 14px; background: transparent; }
+
+                            HorizontalLayout {
+                                width: 100%;
+                                spacing: 6px;
+                                for bar in root.week:
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 8px;
+
+                                        Rectangle {
+                                            height: 104px;
+                                            background: transparent;
+                                            Rectangle {
+                                                x: (parent.width - 26px) / 2;
+                                                y: parent.height - self.height;
+                                                width: 26px;
+                                                height: max(4px, (parent.height - 6px) * bar.ratio);
+                                                border-radius: 5px;
+                                                background: bar.selected ? (week-touch.has-hover ? Theme.accent-hover : Theme.accent) : (week-touch.has-hover ? Theme.bar-hover : Theme.bar);
+                                                animate background { duration: 130ms; }
+                                            }
+                                            if (week-touch.has-hover) :
+                                                Rectangle {
+                                                    x: (parent.width - 74px) / 2;
+                                                    y: 0px;
+                                                    width: 74px;
+                                                    height: 24px;
+                                                    border-radius: 7px;
+                                                    background: Theme.tooltip-bg;
+                                                    Text {
+                                                        text: bar.value;
+                                                        font-size: 10.5px;
+                                                        font-weight: 500;
+                                                        color: Theme.tooltip-text;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            week-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.select-day(bar.offset); }
+                                            }
+                                        }
+
+                                        Text {
+                                            text: bar.label;
+                                            font-size: 11.5px;
+                                            font-weight: bar.selected || bar.is-today ? 600 : 500;
+                                            color: bar.selected ? Theme.accent : bar.is-today ? Theme.text : Theme.text-tertiary;
+                                            horizontal-alignment: center;
+                                            height: 15px;
+                                        }
+                                        HorizontalLayout {
+                                            height: 3px;
+                                            alignment: center;
+                                            Rectangle {
+                                                height: 3px;
+                                                width: 3px;
+                                                border-radius: 1.5px;
+                                                background: bar.is-today ? (bar.selected ? Theme.accent : Theme.text-secondary) : transparent;
+                                            }
+                                        }
+                                    }
+                            }
+
+                            // ---- Lower grid ----
+                            Rectangle { height: 28px; background: transparent; }
+
+                            HorizontalLayout {
+                                width: 100%;
+                                spacing: 34px;
+
+                                // Applications
+                                VerticalLayout {
+                                    width: 60%;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        width: 100%;
+                                        
+                                        Text {
+                                            text: "Applications";
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                            color: Theme.text;
+                                        }
+                                        Rectangle { width: 8px; }
+                                        Text {
+                                            text: root.apps-caption;
+                                            font-size: 11.5px;
+                                            color: Theme.text-tertiary;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Rectangle {
+                                            width: 184px;
+                                            height: 30px;
+                                            border-radius: 8px;
+                                            background: Theme.surface;
+                                            border-width: 1px;
+                                            border-color: search-field.has-focus ? Theme.line-strong : Theme.line;
+                                            SearchIcon {
+                                                x: 10px;
+                                                y: 8px;
+                                            }
+                                            Text {
+                                                x: 28px;
+                                                y: 0px;
+                                                width: parent.width - 54px;
+                                                height: parent.height;
+                                                text: "Find an app";
+                                                font-size: 12px;
+                                                color: Theme.text-tertiary;
+                                                vertical-alignment: center;
+                                                visible: root.search-text == "";
+                                            }
+                                            search-field := TextInput {
+                                                x: 28px;
+                                                y: 0px;
+                                                width: parent.width - 54px;
+                                                height: parent.height;
+                                                text: root.search-text;
+                                                font-size: 12px;
+                                                color: Theme.text;
+                                                single-line: true;
+                                                selection-background-color: Theme.accent-soft;
+                                                selection-foreground-color: Theme.accent;
+                                                edited => {
+                                                    root.search-text = search-field.text;
+                                                    root.search-changed(search-field.text);
+                                                }
+                                            }
+                                            if (root.search-text != "") : Rectangle {
+                                                x: parent.width - 22px;
+                                                y: 9px;
+                                                width: 12px;
+                                                height: 12px;
+                                                background: transparent;
+                                                Path {
+                                                    commands: "M 2 2 L 10 10";
+                                                    stroke: Theme.text-tertiary;
+                                                    stroke-width: 1.4px;
+                                                    fill: transparent;
+                                                }
+                                                Path {
+                                                    commands: "M 10 2 L 2 10";
+                                                    stroke: Theme.text-tertiary;
+                                                    stroke-width: 1.4px;
+                                                    fill: transparent;
+                                                }
+                                                TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => {
+                                                        root.search-text = "";
+                                                        root.search-changed("");
+                                                        search-field.focus();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Rectangle { height: 8px; background: transparent; }
+
+                                    if (root.apps.length == 0) : VerticalLayout {
+                                        VerticalLayout {
+                                            alignment: center;
+                                            padding-top: 22px;
+                                            padding-bottom: 22px;
+                                            spacing: 8px;
+                                            HorizontalLayout {
+                                                alignment: center;
+                                                EmptyMark { }
+                                            }
+                                            Text {
+                                                text: root.search-text != "" ? "No apps match that search" : "No activity recorded";
+                                                font-size: 13px;
+                                                font-weight: 500;
+                                                color: Theme.text-secondary;
+                                                horizontal-alignment: center;
+                                            }
+                                            Text {
+                                                text: root.search-text != "" ? "Try a different name." : (root.has-any-data ? "Nothing was recorded for this day." : "Your usage will appear here as you work.");
+                                                font-size: 12px;
+                                                color: Theme.text-tertiary;
+                                                horizontal-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    if (root.apps.length != 0) : VerticalLayout {
+                                        for app in root.apps:
+                                            Rectangle {
+                                                height: 48px;
+                                                border-radius: 9px;
+                                                background: app-touch.has-hover ? Theme.surface : transparent;
+                                                animate background { duration: 100ms; }
+
+                                                HorizontalLayout {
+                                                    width: 100%;
+                                                    padding-left: 6px;
+                                                    padding-right: 8px;
+                                                    spacing: 10px;
+                                                    
+
+                                                    Rectangle {
+                                                        width: 28px;
+                                                        height: 28px;
+                                                        border-radius: 7px;
+                                                        background: app.has-icon ? transparent : app.tint.with-alpha(0.14);
+                                                        clip: true;
+
+                                                        if (app.has-icon) : Image {
+                                                            width: parent.width;
+                                                            height: parent.height;
+                                                            source: app.icon;
+                                                            image-fit: contain;
+                                                        }
+
+                                                        if (!app.has-icon) : Text {
+                                                            text: app.initial;
+                                                            font-size: 12px;
+                                                            font-weight: 600;
+                                                            color: app.tint;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+
+                                                    VerticalLayout {
+                                                        horizontal-stretch: 1;
+                                                        spacing: 5px;
+                                                        alignment: center;
+                                                        Text {
+                                                            text: app.name;
+                                                            font-size: 12.5px;
+                                                            font-weight: 500;
+                                                            color: Theme.text;
+                                                            overflow: elide;
+                                                        }
+                                                        Rectangle {
+                                                            height: 3px;
+                                                            border-radius: 1.5px;
+                                                            background: Theme.track;
+                                                            Rectangle {
+                                                                width: max(3px, parent.width * app.ratio);
+                                                                height: 100%;
+                                                                border-radius: 1.5px;
+                                                                background: app.tint;
+                                                                opacity: 0.4;
+                                                            }
+                                                        }
+                                                    }
+
+                                                    Text {
+                                                        text: app.duration;
+                                                        font-size: 12px;
+                                                        font-weight: 500;
+                                                        color: Theme.text-secondary;
+                                                        width: 58px;
+                                                        horizontal-alignment: right;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+
+                                                app-touch := TouchArea { }
+                                            }
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 1px;
+                                    background: Theme.line;
+                                    vertical-stretch: 1;
+                                }
+
+                                // Hourly distribution
+                                VerticalLayout {
+                                    width: 35%;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        width: 100%;
+                                        height: 18px;
+                                        Text {
+                                            text: "By hour";
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                            color: Theme.text;
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Text {
+                                            text: root.peak-text;
+                                            font-size: 11px;
+                                            color: Theme.text-tertiary;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+
+                                    Rectangle { height: 20px; background: transparent; }
+
+                                    Rectangle {
+                                        height: 116px;
+                                        background: transparent;
+                                        HorizontalLayout {
+                                            width: 100%;
+                                            height: 100%;
+                                            spacing: 3px;
+                                            for hour in root.hours:
+                                                Rectangle {
+                                                    horizontal-stretch: 1;
+                                                    Rectangle {
+                                                        width: 100%;
+                                                        height: max(3px, parent.height * hour.ratio);
+                                                        y: parent.height - self.height;
+                                                        border-radius: 3px;
+                                                        background: hour.ratio > 0.001 ? Theme.accent : Theme.track;
+                                                        opacity: hour.ratio > 0.001 ? 0.78 : 1;
+                                                    }
+                                                }
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: 1px;
+                                        background: Theme.line;
+                                    }
+                                    Rectangle { height: 8px; background: transparent; }
+                                    HorizontalLayout {
+                                        Text { text: "12a"; font-size: 10px; color: Theme.text-tertiary; horizontal-stretch: 1; }
+                                        Text { text: "6a"; font-size: 10px; color: Theme.text-tertiary; horizontal-stretch: 1; horizontal-alignment: center; }
+                                        Text { text: "12p"; font-size: 10px; color: Theme.text-tertiary; horizontal-stretch: 1; horizontal-alignment: center; }
+                                        Text { text: "6p"; font-size: 10px; color: Theme.text-tertiary; horizontal-stretch: 1; horizontal-alignment: center; }
+                                        Text { text: "12a"; font-size: 10px; color: Theme.text-tertiary; horizontal-stretch: 1; horizontal-alignment: right; }
+                                    }
+                                    Rectangle { vertical-stretch: 1; background: transparent; }
+                                }
+                            }
+                        }
+
+                        if (root.view == 1) : VerticalLayout {
+                            // ---- History view ----
+                            Text {
+                                text: "RECENT HISTORY";
+                                font-size: Theme.micro-size;
+                                font-weight: 600;
+                                color: Theme.text-secondary;
+                                letter-spacing: 1.1px;
+                            }
+                            Rectangle { height: 6px; background: transparent; }
+                            Text {
+                                text: root.history-total;
+                                font-size: 48px;
+                                font-weight: 500;
+                                color: Theme.text;
+                                letter-spacing: -1.1px;
+                                height: 60px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.history-summary;
+                                font-size: 12.5px;
+                                color: Theme.text-secondary;
+                                visible: root.history-summary != "";
+                            }
+                            Rectangle { height: 24px; background: transparent; }
+
+                            if (!root.has-history) : VerticalLayout {
+                                VerticalLayout {
+                                    alignment: center;
+                                    padding-top: 40px;
+                                    spacing: 10px;
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        EmptyMark { }
+                                    }
+                                    Text {
+                                        text: "No history yet";
+                                        font-size: 16px;
+                                        font-weight: 600;
+                                        color: Theme.text;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Days you use your computer will collect here.";
+                                        font-size: 12.5px;
+                                        color: Theme.text-secondary;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+                            if (root.has-history) : VerticalLayout {
+                                for row in root.history:
+                                    Rectangle {
+                                        height: 52px;
+                                        border-radius: 9px;
+                                        background: hist-touch.has-hover ? Theme.surface : transparent;
+                                        animate background { duration: 100ms; }
+
+                                        Text {
+                                            x: 10px;
+                                            y: 0px;
+                                            width: 92px;
+                                            height: 100%;
+                                            text: row.label;
+                                            font-size: 12.5px;
+                                            font-weight: row.is-today ? 600 : 500;
+                                            color: row.is-today ? Theme.text : Theme.text-secondary;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            x: 116px;
+                                            y: 0px;
+                                            width: 72px;
+                                            height: 100%;
+                                            text: row.date;
+                                            font-size: 11px;
+                                            color: Theme.text-tertiary;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        Rectangle {
+                                            x: 204px;
+                                            y: (parent.height - 4px) / 2;
+                                            width: max(40px, parent.width - 300px);
+                                            height: 4px;
+                                            border-radius: 2px;
+                                            background: Theme.track;
+                                            Rectangle {
+                                                width: max(3px, parent.width * row.ratio);
+                                                height: 100%;
+                                                border-radius: 2px;
+                                                background: row.is-today ? Theme.accent : Theme.bar-hover;
+                                            }
+                                        }
+                                        Text {
+                                            x: parent.width - 82px;
+                                            y: 0px;
+                                            width: 52px;
+                                            height: 100%;
+                                            text: row.duration;
+                                            font-size: 12px;
+                                            font-weight: 500;
+                                            color: Theme.text-secondary;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            x: parent.width - 28px;
+                                            y: 0px;
+                                            width: 20px;
+                                            height: 100%;
+                                            text: "›";
+                                            font-size: 17px;
+                                            color: Theme.text-tertiary;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                        hist-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.select-day(row.offset); }
+                                        }
+                                    }
+                            }
+                        }
+
+                        // ---- Quiet footer -----------------------------------
+                        if (root.view == 0) : VerticalLayout {
+                            Rectangle { height: 30px; background: transparent; }
+                            Text {
+                                text: root.recovered ? "Your previous data couldn’t be read and was set aside." : "";
+                                font-size: 10.5px;
+                                color: Theme.text-tertiary;
+                                visible: root.recovered;
+                            }
+                        }
+                    }
+
+                    if (content.preferred-height > flick.height + 8px) : Rectangle {
+                        x: 0px;
+                        y: parent.height - 22px;
+                        width: 100%;
+                        height: 22px;
+                        background: @linear-gradient(180deg, transparent 0%, Theme.bg 100%);
+                    }
+
+                    if (content.preferred-height > flick.height) : Rectangle {
+                        x: parent.width - 6px;
+                        y: min(max(0px, (-flick.viewport-y / max(1px, content.preferred-height - flick.height)) * (flick.height - self.height)), flick.height - self.height);
+                        width: 3px;
+                        height: max(28px, (flick.height / content.preferred-height) * flick.height);
+                        border-radius: 2px;
+                        background: Theme.text-tertiary;
+                        opacity: 0.5;
+                    }
+                }
+            }
+        }
+
+    // ---- Settings sheet --------------------------------------------------
+    if (root.settings-open) : Rectangle {
+        background: transparent;
+        Rectangle {
+            background: Theme.overlay;
+            TouchArea { clicked => { root.close-settings(); } }
+        }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 468px;
+            height: min(600px, parent.height - 24px);
+            border-radius: Theme.radius-lg;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.line;
+            clip: true;
+            TouchArea { clicked => { } }
+
+            VerticalLayout {
+                padding: 26px;
+                padding-top: 22px;
+                spacing: 0;
+
+                HorizontalLayout {
+                    
+                    Text {
+                        text: "Settings";
+                        font-size: 19px;
+                        font-weight: 600;
+                        color: Theme.text;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 14px;
+                        background: close-settings-touch.has-hover ? Theme.hover : transparent;
+                        CloseIcon { x: 8px; y: 8px; }
+                        close-settings-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.close-settings(); }
+                        }
+                    }
+                }
+
+                Rectangle { height: 18px; background: transparent; }
+
+                // Tracking status
+                Rectangle {
+                    border-radius: 10px;
+                    background: Theme.surface-muted;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    HorizontalLayout {
+                        padding: 12px;
+                        spacing: 10px;
+                        
+                        Rectangle {
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: root.tracking-code == 0 ? Theme.success
+                                : root.tracking-code == 6 ? Theme.danger
+                                : root.tracking-code == 2 ? Theme.text-tertiary
+                                : Theme.warning;
+                        }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text {
+                                text: root.tracking-title;
+                                font-size: 12.5px;
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            Text {
+                                text: root.tracking-detail;
+                                font-size: 11.5px;
+                                color: Theme.text-secondary;
+                                wrap: word-wrap;
+                            }
+                        }
+                        PrimaryButton {
+                            label: root.tracking-code == 3 || root.tracking-code == 4 || root.tracking-code == 5 ? "Set up" : root.paused ? "Resume" : "Pause";
+                            clicked => {
+                                if (root.tracking-code == 3 || root.tracking-code == 4 || root.tracking-code == 5) { root.setup-tracking(); }
+                                else if (root.paused) { root.resume-tracking(); }
+                                else { root.set-paused(true); }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 18px; background: transparent; }
+                Hairline { }
+                Rectangle { height: 16px; background: transparent; }
+
+                Text {
+                    text: "Idle timeout";
+                    font-size: 12.5px;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+                Text {
+                    text: "time without input before tracking pauses";
+                    font-size: 11.5px;
+                    color: Theme.text-tertiary;
+                }
+                Rectangle { height: 10px; background: transparent; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Chip {
+                        label: "1 min";
+                        selected: root.idle-seconds == 60;
+                        horizontal-stretch: 1;
+                        clicked => { root.set-idle(60); }
+                    }
+                    Chip {
+                        label: "3 min";
+                        selected: root.idle-seconds == 180;
+                        horizontal-stretch: 1;
+                        clicked => { root.set-idle(180); }
+                    }
+                    Chip {
+                        label: "5 min";
+                        selected: root.idle-seconds == 300;
+                        horizontal-stretch: 1;
+                        clicked => { root.set-idle(300); }
+                    }
+                    Chip {
+                        label: "10 min";
+                        selected: root.idle-seconds == 600;
+                        horizontal-stretch: 1;
+                        clicked => { root.set-idle(600); }
+                    }
+                    Chip {
+                        label: "15 min";
+                        selected: root.idle-seconds == 900;
+                        horizontal-stretch: 1;
+                        clicked => { root.set-idle(900); }
+                    }
+                }
+
+                Rectangle { height: 18px; background: transparent; }
+                Text {
+                    text: "Keep history";
+                    font-size: 12.5px;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+                Rectangle { height: 8px; background: transparent; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Chip {
+                        label: "90 days";
+                        selected: root.retention-days == 90;
+                        horizontal-stretch: 1;
+                        clicked => { root.set-retention(90); }
+                    }
+                    Chip {
+                        label: "1 year";
+                        selected: root.retention-days == 365;
+                        horizontal-stretch: 1;
+                        clicked => { root.set-retention(365); }
+                    }
+                    Chip {
+                        label: "Forever";
+                        selected: root.retention-days == 0;
+                        horizontal-stretch: 1;
+                        clicked => { root.set-retention(0); }
+                    }
+                }
+
+                Rectangle { height: 18px; background: transparent; }
+                Text {
+                    text: "Appearance";
+                    font-size: 12.5px;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+                Rectangle { height: 8px; background: transparent; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Chip {
+                        label: "System";
+                        selected: root.theme-pref == 0;
+                        horizontal-stretch: 1;
+                        clicked => { root.set-theme(0); }
+                    }
+                    Chip {
+                        label: "Light";
+                        selected: root.theme-pref == 1;
+                        horizontal-stretch: 1;
+                        clicked => { root.set-theme(1); }
+                    }
+                    Chip {
+                        label: "Dark";
+                        selected: root.theme-pref == 2;
+                        horizontal-stretch: 1;
+                        clicked => { root.set-theme(2); }
+                    }
+                }
+
+                Rectangle { height: 16px; background: transparent; }
+                Hairline { }
+                Rectangle { height: 8px; background: transparent; }
+
+                HorizontalLayout {
+                    
+                    spacing: 10px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 1px;
+                        Text {
+                            text: "Start at login";
+                            font-size: 12.5px;
+                            color: Theme.text;
+                        }
+                        Text {
+                            text: "keep tracking in the background";
+                            font-size: 11px;
+                            color: Theme.text-tertiary;
+                        }
+                    }
+                    Switch {
+                        checked: root.autostart;
+                        toggled(v) => { root.set-autostart(v); }
+                    }
+                }
+
+                Rectangle { height: 7px; background: transparent; }
+                data-row := Rectangle {
+                    height: 32px;
+                    border-radius: 7px;
+                    background: data-touch.has-hover ? Theme.hover : transparent;
+                    Text {
+                        x: 8px;
+                        y: 0px;
+                        height: parent.height;
+                        text: "Open data folder";
+                        font-size: 12px;
+                        color: Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                    data-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.open-data(); }
+                    }
+                }
+
+                if (root.settings-error != "") : Rectangle {
+                        height: 32px;
+                        Text {
+                            text: root.settings-error;
+                            font-size: 11px;
+                            color: Theme.danger;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                Rectangle { height: 7px; background: transparent; }
+                delete-row := Rectangle {
+                    height: 32px;
+                    border-radius: 7px;
+                    background: delete-touch.has-hover ? Theme.hover : transparent;
+                    visible: !root.confirm-delete;
+                    Text {
+                        x: 8px;
+                        y: 0px;
+                        height: parent.height;
+                        text: "Delete all data…";
+                        font-size: 12px;
+                        color: Theme.text-tertiary;
+                        vertical-alignment: center;
+                    }
+                    delete-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.confirm-delete = true; }
+                    }
+                }
+                Rectangle {
+                    height: 54px;
+                    border-radius: 8px;
+                    background: Theme.surface-muted;
+                    visible: root.confirm-delete;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 6px;
+                        spacing: 8px;
+                        
+                        Text {
+                            text: "Delete every recorded day?";
+                            font-size: 11.5px;
+                            color: Theme.text;
+                            horizontal-stretch: 1;
+                        }
+                        TextButton {
+                            label: "Cancel";
+                            clicked => { root.confirm-delete = false; }
+                        }
+                        TextButton {
+                            label: "Delete";
+                            danger: true;
+                            clicked => {
+                                root.confirm-delete = false;
+                                root.delete-all();
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                Hairline { }
+                Rectangle { height: 10px; background: transparent; }
+                HorizontalLayout {
+                    
+                    Text {
+                        text: "Daymark " + root.app-version;
+                        font-size: 10.5px;
+                        color: Theme.text-tertiary;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    TextButton {
+                        label: "Quit Daymark";
+                        tint: Theme.text-secondary;
+                        clicked => { root.quit(); }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Setup sheet -----------------------------------------------------
+    if (root.setup-open) : Rectangle {
+        background: transparent;
+        Rectangle {
+            background: Theme.overlay;
+            TouchArea { clicked => { root.close-setup(); } }
+        }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 464px;
+            height: root.setup-ready ? 330px : 368px;
+            border-radius: Theme.radius-lg;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.line;
+            TouchArea { clicked => { } }
+
+            VerticalLayout {
+                padding: 28px;
+                spacing: 0;
+
+                Text {
+                    text: root.setup-ready ? "Tracking is on" : "Finish setting up";
+                    font-size: 20px;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+                Rectangle { height: 8px; background: transparent; }
+                Text {
+                    text: root.setup-ready
+                        ? "Daymark can now see which app is active. Usage will appear here as you work."
+                        : "Daymark’s GNOME companion is installed. It reads only the active app’s identity — never window titles, keystrokes or clipboard contents.";
+                    font-size: 12px;
+                    color: Theme.text-secondary;
+                    wrap: word-wrap;
+                }
+                Rectangle { height: 18px; background: transparent; }
+
+                if (!root.setup-ready) : VerticalLayout {
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Rectangle {
+                            width: 22px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: Theme.accent-soft;
+                            Text { text: "1"; font-size: 11px; font-weight: 600; color: Theme.accent; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Text { text: "Installed and enabled"; font-size: 12.5px; font-weight: 600; color: Theme.text; }
+                            Text { text: "The extension is in your user folder."; font-size: 11.5px; color: Theme.text-tertiary; }
+                        }
+                    }
+                    Rectangle { height: 18px; background: transparent; }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Rectangle {
+                            width: 22px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: Theme.accent-soft;
+                            Text { text: "2"; font-size: 11px; font-weight: 600; color: Theme.accent; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Text { text: "Sign out and back in once"; font-size: 12.5px; font-weight: 600; color: Theme.text; }
+                            Text {
+                                text: root.is-wayland
+                                    ? "GNOME loads new Shell extensions at login."
+                                    : "Or press Alt+F2, type r, and press Enter.";
+                                font-size: 11.5px;
+                                color: Theme.text-tertiary;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    Rectangle { height: 18px; background: transparent; }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Rectangle {
+                            width: 22px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: Theme.accent-soft;
+                            Text { text: "3"; font-size: 11px; font-weight: 600; color: Theme.accent; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Text { text: "Open Daymark again"; font-size: 12.5px; font-weight: 600; color: Theme.text; }
+                            Text { text: "Tracking starts on its own from then on."; font-size: 11.5px; color: Theme.text-tertiary; }
+                        }
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+                Rectangle { height: 18px; background: transparent; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    TextButton {
+                        label: "Open data folder";
+                        clicked => { root.open-data(); }
+                    }
+                    PrimaryButton {
+                        label: root.setup-ready ? "Done" : "Got it";
+                        clicked => { root.close-setup(); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+    if (root.load-error != "") : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        background: Theme.bg;
+        VerticalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: center;
+            spacing: 12px;
+            HorizontalLayout {
+                alignment: center;
+                EmptyMark { }
+            }
+            Text {
+                width: 100%;
+                text: "Daymark couldn’t read its data";
+                font-size: 20px;
+                font-weight: 600;
+                color: Theme.text;
+                horizontal-alignment: center;
+            }
+            HorizontalLayout {
+                alignment: center;
+                Text {
+                    width: 460px;
+                    text: root.load-error;
+                    font-size: 12.5px;
+                    color: Theme.text-secondary;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+            }
+            HorizontalLayout {
+                alignment: center;
+                PrimaryButton {
+                    label: "Try again";
+                    clicked => { root.retry(); }
+                }
+            }
+        }
+    }
+}
