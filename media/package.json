@@ -1,0 +1,21 @@
+{
+  "name": "daymark-media",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Motion assets for the Daymark README",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts DaymarkTour ../docs/media/daymark-tour.mp4 --codec=h264 --crf=20",
+    "still": "remotion still src/index.ts DaymarkTour"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.538",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "remotion": "4.0.538"
+  },
+  "devDependencies": {
+    "@types/react": "19.1.0",
+    "typescript": "5.9.2"
+  }
+}
