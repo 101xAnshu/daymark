@@ -3,6 +3,8 @@
 A quiet, local screen time journal for Ubuntu GNOME — the useful part of Screen
 Time, without an account, a cloud, a web view or a permanent performance tax.
 
+[Source and issues](https://github.com/101xAnshu/daymark)
+
 ![Daymark, light theme](docs/daymark-light.png)
 
 Daymark shows one day at a time: how long you used the computer, how that
@@ -12,6 +14,8 @@ and which applications received the time. Everything is stored on this machine.
 | Dark | History | Settings |
 | --- | --- | --- |
 | ![Dark theme](docs/daymark-dark.png) | ![History](docs/daymark-history.png) | ![Settings](docs/daymark-settings.png) |
+| **Setup** | **First run** | |
+| ![Setup](docs/daymark-setup.png) | ![First run](docs/daymark-first-run.png) | |
 
 ## Install
 
@@ -66,6 +70,10 @@ The default Wayland-only build was chosen to keep the executable below 5 MB.
 - Click a day in the weekly chart, or use `←` / `→` to move one day.
 - `T` returns to today, `Ctrl+1` / `Ctrl+2` switch between Day and History.
 - `Ctrl+,` opens Settings; `Ctrl+W` hides the window; `Ctrl+Q` quits completely.
+- Daymark uses a custom frameless title bar. Drag the empty header or brand area to move
+  the window, drag the window edges to resize, and use the minimize, maximize
+  and close controls at the right. Close hides to the background; **Quit
+  Daymark** is in Settings.
 - History lists the last 14 days; click any row to inspect that day.
 - Search filters the application list by name.
 - Settings holds the idle timeout, history retention, appearance, autostart,
@@ -138,7 +146,15 @@ and is checkpointed normally.
   missing-icon applications fall back to a quiet colored initial tile.
 - Slint is pinned to 1.8 on purpose. Slint 1.18's Parley/ICU text stack plus
   its image/SVG dependencies made even a minimal build about 10 MB; 1.8 keeps
-  the full dashboard at 4.55 MB without giving up the design.
+  the full dashboard well under 5 MB without giving up the design.
+- Slint 1.8 does not expose the native window-move hook used by later versions'
+  `WindowMoveArea`. A tiny local backport in `vendor/` adds
+  `Window::start_window_move()` and wires it to winit's `drag_window()`; the
+  rest of the vendored source is upstream with warning-only cleanups. This is
+  what makes the frameless custom title bar draggable on Wayland while keeping
+  the small Slint build.
+- The search icon is a small embedded raster because the software renderer does
+  not implement `Path` drawing (it is used only as a tinted 16px asset).
 - SQLite is linked dynamically to the copy every Ubuntu desktop already has,
   rather than embedding a second copy.
 - One local Unix socket plus `flock` provides single-instance behavior; a second
@@ -150,14 +166,14 @@ Measured on Ubuntu 26.04, GNOME Shell 50.1, Wayland, x86_64, release build:
 
 | Item | Result |
 | --- | ---: |
-| Stripped executable | **4,552,088 bytes (4.34 MiB)** |
-| Installed application files (binary, icon, entries, extension) | ≈ 4.57 MB |
+| Stripped executable | **4,692,024 bytes (4.47 MiB)** |
+| Installed application files (binary, icon, entries, extension) | ≈ 4.71 MB |
 | Fresh database | 4 KB |
-| Hidden RSS | ≈ 18 MB |
-| Hidden CPU, 20 s sample | 0.0% (0 ticks at 100 Hz) |
+| Hidden RSS | ≈ 17 MB |
+| Hidden CPU, 20 s sample | 0.10% (2 ticks at 100 Hz) |
 | Hidden wakeups | ≈ 1.4/s |
-| Visible RSS | ≈ 36 MB |
-| Visible CPU, 30 s sample | 0.23% |
+| Visible RSS (pre-chrome sample) | ≈ 36 MB |
+| Visible CPU (pre-chrome sample) | 0.23% |
 | Visible wakeups | ≈ 12/s |
 
 CPU is from `/proc/<pid>/stat` (`utime+stime` ticks / 100 Hz / interval); RSS
@@ -177,6 +193,9 @@ optional X11 backend adds code and is not included in these measurements.
 - The real release binary was launched on the live GNOME 50.1 Wayland session
   (hidden and visible), with a second instance proving single-instance
   forwarding, `--quit` shutdown, autostart creation, and database initialization.
+- The custom frameless chrome, native drag hook, resize border, minimize,
+  maximize and close callbacks compile against the patched winit/Slint path.
+  Interactive drag/resize was not exercised in the headless visual harness.
 - An end-to-end run fed the real tracker a synthetic extension state file; two
   focus intervals were written and idle truncation applied.
 - The companion was loaded by a headless GNOME Shell 50.1 session: it created
@@ -187,8 +206,9 @@ optional X11 backend adds code and is not included in these measurements.
   active. The same Mutter `focus_window`/`Shell.WindowTracker` API is used by
   the already-working screen-time extension on this machine.
 - Visual states (light, dark, populated, empty, first-run setup, history,
-  settings, error) were rendered through the application's own software
-  renderer with deterministic data at 1120×780 and inspected. GNOME's screenshot
+  settings, error, and focused search) were rendered through the application's
+  own software renderer with deterministic data at 1120×780 and 900×620 and
+  inspected. GNOME's screenshot
   D-Bus API denied external capture in this session, so the images in `docs/`
   are true renderer output rather than compositor grabs.
 

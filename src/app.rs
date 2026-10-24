@@ -54,7 +54,15 @@ impl IconCache {
 
 fn decode_png(path: &std::path::Path) -> Option<Image> {
     let file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
-    let mut decoder = png::Decoder::new(file);
+    decode_png_reader(file)
+}
+
+fn decode_png_bytes(bytes: &[u8]) -> Option<Image> {
+    decode_png_reader(std::io::BufReader::new(std::io::Cursor::new(bytes)))
+}
+
+fn decode_png_reader<R: std::io::BufRead + std::io::Seek>(reader: R) -> Option<Image> {
+    let mut decoder = png::Decoder::new(reader);
     decoder.set_transformations(
         png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
     );
@@ -90,6 +98,10 @@ fn decode_png(path: &std::path::Path) -> Option<Image> {
     }
     let buffer = SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&rgba, w, h);
     Some(Image::from_rgba8(buffer))
+}
+
+fn search_icon() -> Option<Image> {
+    decode_png_bytes(include_bytes!("../assets/search.png"))
 }
 
 const PALETTE_LIGHT: [(u8, u8, u8); 8] = [
@@ -220,6 +232,9 @@ impl AppController {
             command,
         }));
 
+        if let Some(icon) = search_icon() {
+            controller.borrow().ui.set_search_icon(icon);
+        }
         Self::wire(&controller);
         controller.borrow_mut().refresh();
         controller
@@ -234,6 +249,7 @@ impl AppController {
         self.ui.set_is_wayland(crate::platform::is_wayland());
         self.ui.set_selected_offset(self.selected_offset);
         self.ui.set_view(self.view);
+        self.ui.set_maximized(self.ui.window().is_maximized());
         self.ui.global::<Theme>().set_dark(self.dark);
         self.ui.set_paused(self.settings.paused);
         self.ui.set_idle_seconds(self.settings.idle_seconds as i32);
@@ -330,7 +346,6 @@ impl AppController {
         let day_agg = stats::aggregate_day(&rows, day);
         self.ui
             .set_total_text(date::format_duration(day_agg.total).into());
-        self.ui.set_has_data(day_agg.total > 0);
         self.ui.set_has_any_data(store.has_any_sessions());
         self.ui.set_date_kicker(
             if self.selected_offset == 0 {
@@ -378,7 +393,7 @@ impl AppController {
         );
         self.ui.set_week_total_text(
             if week_sum > 0 {
-                format!("{} total", date::format_duration(week_sum))
+                date::format_duration(week_sum)
             } else {
                 String::new()
             }
@@ -415,7 +430,9 @@ impl AppController {
         }
         let shown = app_rows.len();
         self.ui.set_apps_caption(
-            if !self.query.is_empty() {
+            if total_apps == 0 {
+                String::new()
+            } else if !self.query.is_empty() {
                 format!("{shown} of {total_apps} apps")
             } else if total_apps == 1 {
                 "1 app".into()
@@ -662,6 +679,7 @@ impl AppController {
                 ctl.setup_open = false;
                 ctl.ui.set_settings_open(true);
                 ctl.ui.set_setup_open(false);
+                ctl.ui.set_confirm_delete(false);
                 ctl.settings_error.clear();
                 ctl.force_refresh = true;
                 ctl.refresh();
@@ -673,6 +691,7 @@ impl AppController {
                 let mut ctl = c.borrow_mut();
                 ctl.settings_open = false;
                 ctl.ui.set_settings_open(false);
+                ctl.ui.set_confirm_delete(false);
                 ctl.force_refresh = true;
                 ctl.refresh();
             });
@@ -869,7 +888,23 @@ impl AppController {
             controller.borrow().ui.on_toggle_maximize(move || {
                 let ctl = c.borrow();
                 let window = ctl.ui.window();
-                window.set_maximized(!window.is_maximized());
+                let next = !window.is_maximized();
+                window.set_maximized(next);
+                ctl.ui.set_maximized(next);
+            });
+        }
+        {
+            let c = controller.clone();
+            controller.borrow().ui.on_minimize_window(move || {
+                let ctl = c.borrow();
+                ctl.ui.window().set_minimized(true);
+            });
+        }
+        {
+            let c = controller.clone();
+            controller.borrow().ui.on_start_window_drag(move || {
+                let ctl = c.borrow();
+                ctl.ui.window().start_window_move();
             });
         }
         {
@@ -935,6 +970,8 @@ impl AppController {
             match command.swap(COMMAND_NONE, Ordering::SeqCst) {
                 COMMAND_SHOW => {
                     self.force_refresh = true;
+                    let window = self.ui.window();
+                    window.set_minimized(false);
                     let _ = self.ui.show();
                 }
                 COMMAND_QUIT => {
@@ -954,6 +991,10 @@ impl AppController {
                 self.ui.set_setup_ready(true);
                 self.force_refresh = true;
             }
+        }
+        let is_maximized = self.ui.window().is_maximized();
+        if self.ui.get_maximized() != is_maximized {
+            self.ui.set_maximized(is_maximized);
         }
         if !self.ui.window().is_visible() {
             return;

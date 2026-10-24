@@ -62,7 +62,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_nanos()
     ));
     let store = Store::open_at(&db_path)?;
-    if state != "empty" && state != "light-empty" && state != "empty-banner" {
+    if state != "empty"
+        && state != "light-empty"
+        && state != "empty-banner"
+        && state != "empty-waiting"
+    {
         daymark::demo::seed(&store);
     }
     let mut settings = Settings {
@@ -75,6 +79,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (
                 TrackingStatus::NeedsSetup,
                 "GNOME integration is not installed",
+            )
+        } else if state == "waiting" || state == "empty-waiting" {
+            (
+                TrackingStatus::Waiting,
+                "Sign out and back in once to activate tracking",
             )
         } else {
             (status, "Tracking Brave Web Browser")
@@ -105,6 +114,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match state.as_str() {
             "history" => ctl.set_view_for_render(1),
             "settings" | "dark-settings" | "light-settings" => ctl.open_settings_for_render(),
+            "delete" => {
+                ctl.open_settings_for_render();
+                ctl.ui.set_confirm_delete(true);
+            }
+            "maximized" => ctl.ui.set_maximized(true),
             "setup" => ctl.open_setup_for_render(false),
             "setup-ready" => ctl.open_setup_for_render(true),
             "banner" => { /* the setup banner is shown automatically */ }
@@ -113,16 +127,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "error" => ctl.set_load_error(
                 "The local data file could not be opened: permission denied.".into(),
             ),
-            "light-empty" | "empty-banner" => {}
+            "light-empty" | "empty-banner" | "empty-waiting" => {}
             _ => {}
         }
     }
     {
         let ctl = controller.borrow();
+        eprintln!(
+            "render state={} banner={} code={} action={}",
+            state,
+            ctl.ui.get_show_banner(),
+            ctl.ui.get_tracking_code(),
+            ctl.ui.get_banner_action()
+        );
         if state == "dark" || state == "dark-settings" {
             ctl.ui.global::<Theme>().set_dark(true);
         }
         ctl.ui.show()?;
+    }
+    if state == "search" {
+        let pos = slint::LogicalPosition::new(550.0, 426.0);
+        window.dispatch_event(slint::platform::WindowEvent::PointerPressed {
+            position: pos,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        window.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position: pos,
+            button: slint::platform::PointerEventButton::Left,
+        });
     }
     slint::platform::update_timers_and_animations();
     window.request_redraw();

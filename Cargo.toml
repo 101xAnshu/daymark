@@ -32,3 +32,11 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# A tiny local backport: Slint 1.8 does not expose the native window-move hook
+# that later versions use for custom frameless title bars. The two vendored
+# crates are unmodified upstream sources except for a no-op trait hook,
+# Window::start_window_move(), and the winit implementation calling drag_window.
+[patch.crates-io]
+i-slint-core = { path = "vendor/i-slint-core" }
+i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }

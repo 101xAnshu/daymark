@@ -1224,8 +1224,6 @@ dependencies = [
 [[package]]
 name = "i-slint-backend-winit"
 version = "1.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4831644094018b8533264d601ab54f585ba6cc834068e8eae77e571d4cc5b70e"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -1298,8 +1296,6 @@ dependencies = [
 [[package]]
 name = "i-slint-core"
 version = "1.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d2757683b3377730a67966479a88d6c9f27f7b50b379e3a31c7fbf954e4a661"
 dependencies = [
  "auto_enums",
  "bitflags 2.13.2",
