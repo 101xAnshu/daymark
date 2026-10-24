@@ -216,6 +216,7 @@ export component AppWindow inherits Window {
                 header-drag := TouchArea {
                     pointer-event(event) => {
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                            key-root.focus();
                             root.header-dragging = true;
                         } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
                             root.header-dragging = false;
@@ -246,39 +247,45 @@ export component AppWindow inherits Window {
                         spacing: 10px;
                         alignment: center;
                         // A quiet sunrise mark, drawn rather than borrowed.
-                        Rectangle {
-                            width: 20px;
-                            height: 15px;
-                            background: transparent;
+                        // Wrapped so the mark is centred on the wordmark's
+                        // optical centre instead of the top of the header row.
+                        VerticalLayout {
+                            alignment: center;
+                            padding-top: 2px;
                             Rectangle {
-                                x: 2px;
-                                y: 0px;
-                                width: 16px;
-                                height: 8px;
-                                clip: true;
+                                width: 20px;
+                                height: 15px;
                                 background: transparent;
                                 Rectangle {
+                                    x: 2px;
+                                    y: 0px;
                                     width: 16px;
-                                    height: 16px;
-                                    border-radius: 8px;
+                                    height: 8px;
+                                    clip: true;
+                                    background: transparent;
+                                    Rectangle {
+                                        width: 16px;
+                                        height: 16px;
+                                        border-radius: 8px;
+                                        background: Theme.accent;
+                                    }
+                                }
+                                Rectangle {
+                                    x: 0px;
+                                    y: 10px;
+                                    width: 20px;
+                                    height: 2px;
+                                    border-radius: 1px;
                                     background: Theme.accent;
                                 }
-                            }
-                            Rectangle {
-                                x: 0px;
-                                y: 10px;
-                                width: 20px;
-                                height: 2px;
-                                border-radius: 1px;
-                                background: Theme.accent;
-                            }
-                            Rectangle {
-                                x: 0px;
-                                y: 14px;
-                                width: 12px;
-                                height: 1px;
-                                background: Theme.accent;
-                                opacity: 0.45;
+                                Rectangle {
+                                    x: 0px;
+                                    y: 14px;
+                                    width: 12px;
+                                    height: 1px;
+                                    background: Theme.accent;
+                                    opacity: 0.45;
+                                }
                             }
                         }
                         Text {
@@ -391,6 +398,18 @@ export component AppWindow inherits Window {
                     viewport-width: self.width;
                     viewport-height: content.preferred-height;
                     interactive: true;
+
+                    // A click that lands on no control still means "I am done
+                    // with the search field". The Flickable intercepts presses
+                    // before they can reach the window background, so the
+                    // dismiss area lives inside it, behind the content.
+                    dismiss-click := TouchArea {
+                        x: 0px;
+                        y: -flick.viewport-y;
+                        width: 100%;
+                        height: flick.height;
+                        clicked => { key-root.focus(); }
+                    }
 
                     content := VerticalLayout {
                         width: flick.width;

@@ -178,7 +178,7 @@ Measured on Ubuntu 26.04, GNOME Shell 50.1, Wayland, x86_64, release build:
 
 | Item | Result |
 | --- | ---: |
-| Stripped executable | **8,826,352 bytes (8.42 MiB)** |
+| Stripped executable | **8,828,912 bytes (8.42 MiB)** |
 | Installed application files (binary, icon, entries, extension) | ≈ 8.85 MB |
 | Fresh database | 4 KB |
 | Hidden RSS | ≈ 8.2 MB |
