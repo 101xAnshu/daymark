@@ -70,6 +70,12 @@ with GNOME Shell 50.1. The build includes both the Wayland and X11 window
 backends.
 
 ```bash
+sudo apt install build-essential pkg-config
+```
+
+Then clone the repository and run the installer:
+
+```bash
 git clone https://github.com/101xAnshu/daymark.git
 cd daymark
 ./install.sh
