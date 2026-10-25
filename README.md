@@ -69,6 +69,15 @@ Daymark targets **Ubuntu with GNOME 45–50** and has been tested on Ubuntu 26.0
 with GNOME Shell 50.1. The build includes both the Wayland and X11 window
 backends.
 
+The installer builds from source, so first install Rust 1.85+ from
+[rustup.rs](https://rustup.rs) and the system build dependencies:
+
+```bash
+sudo apt install build-essential pkg-config
+```
+
+Then clone the repository and run the installer:
+
 ```bash
 git clone https://github.com/101xAnshu/daymark.git
 cd daymark
