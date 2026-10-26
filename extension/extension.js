@@ -30,6 +30,8 @@ export default class DaymarkExtension extends Extension {
         GLib.mkdir_with_parents(this._dir, 0o700);
         this._statePath = GLib.build_filenamev([this._dir, 'state.json']);
         this._configPath = GLib.build_filenamev([this._dir, 'config.json']);
+        this._notifyPath = GLib.build_filenamev([this._dir, 'notify.json']);
+        this._lastNotificationId = null;
 
         this._enabled = true;
         this._seq = 0;
@@ -54,6 +56,8 @@ export default class DaymarkExtension extends Extension {
             this._configMonitorId = this._configMonitor.connect('changed', (_monitor, file) => {
                 if (file && file.get_basename() === 'config.json')
                     this._loadConfig();
+                else if (file && file.get_basename() === 'notify.json')
+                    this._showNotification();
             });
         } catch (e) {
             this._configMonitor = null;
@@ -105,6 +109,7 @@ export default class DaymarkExtension extends Extension {
         this._armIdleWatch();
         this._writeState();
         this._refreshAudio();
+        this._showNotification();
     }
 
     disable() {
@@ -160,6 +165,41 @@ export default class DaymarkExtension extends Extension {
         if (seconds !== this._idleSeconds) {
             this._idleSeconds = seconds;
             this._armIdleWatch();
+        }
+    }
+
+    _showNotification() {
+        if (!this._enabled)
+            return;
+        let payload;
+        try {
+            const [ok, bytes] = GLib.file_get_contents(this._notifyPath);
+            if (!ok)
+                return;
+            payload = JSON.parse(new TextDecoder().decode(bytes));
+        } catch (e) {
+            return;
+        }
+        if (!payload || typeof payload.id !== 'string' || !payload.id)
+            return;
+        if (payload.id === this._lastNotificationId)
+            return;
+        this._lastNotificationId = payload.id;
+        const title = typeof payload.title === 'string' && payload.title
+            ? payload.title : 'Daymark';
+        const body = typeof payload.body === 'string' ? payload.body : '';
+        try {
+            if (typeof Main.notify === 'function')
+                Main.notify(title, body);
+            else
+                console.debug('[Daymark] Main.notify is unavailable');
+        } catch (e) {
+            console.debug(`[Daymark] could not show the digest: ${e}`);
+        }
+        try {
+            Gio.File.new_for_path(this._notifyPath).delete(null);
+        } catch (e) {
+            // The app can replace it next week; a stale file is harmless.
         }
     }
 
