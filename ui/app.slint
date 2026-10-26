@@ -128,6 +128,9 @@ export component AppWindow inherits Window {
     in property <[MetricRow]> metrics: [];
     in property <[TimelineSegment]> timeline: [];
     in property <bool> has-timeline: false;
+    // The selected day kept its daily total but no raw intervals, so hourly
+    // detail and the timeline are unavailable.
+    in property <bool> totals-only: false;
     // Quiet note under the timeline, e.g. "12m with audio or a video playing".
     in property <string> presence-note: "";
     in property <[HeatRow]> heatmap: [];
@@ -711,7 +714,7 @@ export component AppWindow inherits Window {
                                 }
                                 Rectangle { horizontal-stretch: 1; }
                                 Text {
-                                    text: "00:00 – 24:00";
+                                    text: root.totals-only ? "Totals only" : "00:00 – 24:00";
                                     font-size: Theme.micro-size;
                                     color: Theme.text-tertiary;
                                     vertical-alignment: center;
@@ -734,7 +737,7 @@ export component AppWindow inherits Window {
                                         opacity: 0.86;
                                     }
 
-                                if (!root.has-timeline) : Text {
+                                if (!root.has-timeline && !root.totals-only) : Text {
                                     text: "Nothing recorded on this day";
                                     width: 100%;
                                     height: 100%;
@@ -742,6 +745,16 @@ export component AppWindow inherits Window {
                                     color: Theme.text-tertiary;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
+                                }
+                                if (root.totals-only) : Text {
+                                    text: "Totals only · hourly detail is unavailable for a rolled-up day";
+                                    width: 100%;
+                                    height: 100%;
+                                    font-size: Theme.small-size;
+                                    color: Theme.text-tertiary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    overflow: elide;
                                 }
                             }
                             if (root.presence-note != "") : Text {
@@ -757,6 +770,7 @@ export component AppWindow inherits Window {
                             timeline-axis := Rectangle {
                                 height: 14px;
                                 background: transparent;
+                                visible: !root.totals-only;
                                 property <length> slot: self.width / 24;
                                 Text {
                                     x: 0px;
@@ -1129,7 +1143,31 @@ export component AppWindow inherits Window {
 
                                     Rectangle { height: 20px; background: transparent; }
 
-                                    Rectangle {
+                                    if (root.totals-only) : Rectangle {
+                                        height: 116px;
+                                        border-radius: 8px;
+                                        background: Theme.surface-muted;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: 5px;
+                                            Text {
+                                                text: "Totals only";
+                                                font-size: Theme.body-size;
+                                                font-weight: 600;
+                                                color: Theme.text-secondary;
+                                                horizontal-alignment: center;
+                                            }
+                                            Text {
+                                                text: "Raw intervals for this day were removed by retention.";
+                                                font-size: Theme.micro-size;
+                                                color: Theme.text-tertiary;
+                                                horizontal-alignment: center;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+
+                                    if (!root.totals-only) : Rectangle {
                                         height: 116px;
                                         background: transparent;
                                         HorizontalLayout {
@@ -1151,12 +1189,13 @@ export component AppWindow inherits Window {
                                         }
                                     }
 
-                                    Rectangle {
+                                    if (!root.totals-only) : Rectangle {
                                         height: 1px;
                                         background: Theme.line;
                                     }
-                                    Rectangle { height: 8px; background: transparent; }
-                                    hour-axis := Rectangle {
+                                    if (!root.totals-only) : Rectangle { height: 8px; background: transparent; }
+                                    if (!root.totals-only) : Rectangle {
+                                        hour-axis := Rectangle {
                                         height: 14px;
                                         background: transparent;
                                         property <length> slot: (self.width - 69px) / 24;
@@ -1209,6 +1248,7 @@ export component AppWindow inherits Window {
                                             horizontal-alignment: right;
                                             vertical-alignment: center;
                                         }
+                                    }
                                     }
                                     Rectangle { vertical-stretch: 1; background: transparent; }
                                 }

@@ -16,7 +16,7 @@ use crate::db::{self, AppInfo, Store};
 use crate::instance::{COMMAND_NONE, COMMAND_QUIT, COMMAND_SHOW};
 use crate::logging;
 use crate::settings::{self, Settings, ThemePref};
-use crate::stats::{self, SessionRow};
+use crate::stats::{self, RollupTotal, SessionRow};
 use crate::tracker::{self, LiveState, Presence, TrackerHandle, TrackingStatus};
 use crate::{
     AppRow, AppWindow, DayBar, HeatCell, HeatRow, HistoryRow, HourBar, MetricRow, Theme,
@@ -395,6 +395,7 @@ impl AppController {
             self.ui
                 .set_timeline(ModelRc::new(VecModel::from(Vec::<TimelineSegment>::new())));
             self.ui.set_has_timeline(false);
+            self.ui.set_totals_only(false);
             self.ui
                 .set_heatmap(ModelRc::new(VecModel::from(Vec::<HeatRow>::new())));
             self.ui.set_heatmap_total("".into());
@@ -408,17 +409,19 @@ impl AppController {
         };
 
         // A query window large enough for the weekly chart, the previous day
-        // and a seven-day average, without touching the whole database.
+        // and a seven-day average, without touching the whole database. The
+        // store returns raw intervals and preserved daily totals together; a
+        // day answered from its rollup never also counts its old intervals.
         let query_start = day.add_days(-8).start_ts();
         let query_end = day.end_ts();
-        let mut rows = store
-            .sessions_between(query_start, query_end)
+        let mut day_data = store
+            .day_data_between(query_start, query_end)
             .unwrap_or_default();
         let mut live_info: Option<AppInfo> = None;
         if let Some(current) = &live.current {
             let end = current.started.saturating_add(current.elapsed.max(0));
             if end > current.started && end > query_start && current.started < query_end {
-                rows.push(SessionRow {
+                day_data.rows.push(SessionRow {
                     app_id: current.app_id,
                     started: current.started,
                     ended: end,
@@ -432,12 +435,18 @@ impl AppController {
                 desktop_id: None,
             });
         }
+        let rollups = day_data.rollups;
+        let rows = day_data.rows;
+        let day_totals = stats::day_totals(&rows, &rollups, day);
+        let totals_only = day_totals.totals_only();
+        self.ui.set_totals_only(totals_only);
         let mut app_infos = {
             let ids: Vec<i64> = {
                 let mut seen = std::collections::HashSet::new();
                 rows.iter()
-                    .filter(|r| seen.insert(r.app_id))
                     .map(|r| r.app_id)
+                    .chain(rollups.iter().map(|r| r.app_id))
+                    .filter(|id| seen.insert(*id))
                     .collect()
             };
             store.app_infos(&ids)
@@ -448,7 +457,7 @@ impl AppController {
 
         let day_agg = stats::aggregate_day(&rows, day);
         self.ui
-            .set_total_text(date::format_duration(day_agg.total).into());
+            .set_total_text(date::format_duration(day_totals.total).into());
         self.ui.set_has_any_data(store.has_any_sessions());
         self.ui.set_date_kicker(
             if self.selected_offset == 0 {
@@ -459,17 +468,19 @@ impl AppController {
             .into(),
         );
         self.ui.set_compare_text(
-            self.comparison_text(&rows, day, day_agg.total, store)
+            self.comparison_text(&rows, &rollups, day, day_totals.total, store)
                 .into(),
         );
 
         // A quiet, factual row: no scores or targets, only what the stored
-        // intervals already say about the selected day.
-        let stretch = stats::longest_stretch(&rows, day);
-        let app_count = stats::distinct_apps(&rows, day);
-        let after_midnight = stats::after_midnight_seconds(&rows, day);
-        let mut metrics = vec![
-            MetricRow {
+        // intervals already say about the selected day. A rolled-up day has no
+        // intervals, so only the metrics a daily total can support are shown.
+        let app_count = day_totals.apps.len();
+        let mut metrics = Vec::new();
+        if !totals_only {
+            let stretch = stats::longest_stretch(&rows, day);
+            let after_midnight = stats::after_midnight_seconds(&rows, day);
+            metrics.push(MetricRow {
                 label: "Longest stretch".into(),
                 value: if stretch > 0 {
                     date::format_duration(stretch)
@@ -480,15 +491,15 @@ impl AppController {
                 detail: "uninterrupted".into(),
                 show_rule: false,
                 accent: false,
-            },
-            MetricRow {
+            });
+            metrics.push(MetricRow {
                 label: "Apps".into(),
                 value: app_count.to_string().into(),
                 detail: "distinct".into(),
                 show_rule: true,
                 accent: false,
-            },
-            MetricRow {
+            });
+            metrics.push(MetricRow {
                 label: "After midnight".into(),
                 value: if after_midnight > 0 {
                     date::format_duration(after_midnight)
@@ -499,9 +510,17 @@ impl AppController {
                 detail: format!("00:00–{:02}:00", stats::AFTER_MIDNIGHT_HOURS).into(),
                 show_rule: true,
                 accent: false,
-            },
-        ];
-        let (week_value, week_detail) = match stats::week_delta(&rows, day) {
+            });
+        } else {
+            metrics.push(MetricRow {
+                label: "Apps".into(),
+                value: app_count.to_string().into(),
+                detail: "distinct".into(),
+                show_rule: false,
+                accent: false,
+            });
+        }
+        let (week_value, week_detail) = match stats::week_delta_with_rollups(&rows, &rollups, day) {
             Some(delta) if delta.abs() < 300 => ("Even".to_string(), "same weekday"),
             Some(delta) => (
                 format!(
@@ -537,10 +556,15 @@ impl AppController {
 
         // Presence is a quiet note, not a metric: the row above is already
         // full at the 900 px minimum width. The live interval is excluded from
-        // stored day rows, so add it separately when it has presence.
-        let mut presence_seconds = store
-            .presence_seconds_between(day.start_ts(), day.end_ts())
-            .unwrap_or(0);
+        // stored day rows, so add it separately when it has presence. A rolled
+        // up day carries no presence information at all.
+        let mut presence_seconds = if totals_only {
+            0
+        } else {
+            store
+                .presence_seconds_between(day.start_ts(), day.end_ts())
+                .unwrap_or(0)
+        };
         if self.selected_offset == 0 {
             if let Some(current) = &live.current {
                 if current.presence != Presence::Input {
@@ -551,24 +575,28 @@ impl AppController {
         self.ui
             .set_presence_note(presence_note(presence_seconds).into());
 
-        let timeline: Vec<TimelineSegment> = stats::timeline_segments(&rows, day)
-            .into_iter()
-            .map(|segment| {
-                let tint = app_infos
-                    .get(&segment.app_id)
-                    .map(|info| app_tint(&info.key, self.dark))
-                    .unwrap_or_else(|| app_tint(&segment.app_id.to_string(), self.dark));
-                TimelineSegment {
-                    start: segment.start,
-                    width: (segment.end - segment.start).max(0.0),
-                    tint,
-                }
-            })
-            .collect();
+        let timeline: Vec<TimelineSegment> = if totals_only {
+            Vec::new()
+        } else {
+            stats::timeline_segments(&rows, day)
+                .into_iter()
+                .map(|segment| {
+                    let tint = app_infos
+                        .get(&segment.app_id)
+                        .map(|info| app_tint(&info.key, self.dark))
+                        .unwrap_or_else(|| app_tint(&segment.app_id.to_string(), self.dark));
+                    TimelineSegment {
+                        start: segment.start,
+                        width: (segment.end - segment.start).max(0.0),
+                        tint,
+                    }
+                })
+                .collect()
+        };
         self.ui.set_has_timeline(!timeline.is_empty());
         self.ui.set_timeline(ModelRc::new(VecModel::from(timeline)));
 
-        let week_totals = stats::totals_ending_at(&rows, day, 7);
+        let week_totals = stats::totals_ending_at_with_rollups(&rows, &rollups, day, 7);
         let max_week = week_totals
             .iter()
             .map(|(_, v)| *v)
@@ -611,7 +639,8 @@ impl AppController {
 
         // Rhythm: the same seven days, split into local hours. The intensity is
         // relative to the busiest hour in the window, so quiet weeks still show
-        // their shape instead of going flat.
+        // their shape instead of going flat. Hourly rollups do not exist, so
+        // this view only has data where raw intervals still do.
         let heatmap_days = stats::hourly_ending_at(&rows, day, 7);
         let heat_max = heatmap_days
             .iter()
@@ -620,6 +649,10 @@ impl AppController {
             .max()
             .unwrap_or(0)
             .max(1);
+        let heatmap_total: i64 = heatmap_days
+            .iter()
+            .map(|(_, hourly)| hourly.iter().sum::<i64>())
+            .sum();
         let heatmap_rows: Vec<HeatRow> = heatmap_days
             .iter()
             .map(|(d, hourly)| {
@@ -640,21 +673,21 @@ impl AppController {
         self.ui
             .set_heatmap(ModelRc::new(VecModel::from(heatmap_rows)));
         self.ui.set_heatmap_total(
-            if week_sum > 0 {
-                date::format_duration(week_sum)
+            if heatmap_total > 0 {
+                date::format_duration(heatmap_total)
             } else {
                 String::new()
             }
             .into(),
         );
-        self.ui.set_has_heatmap(week_sum > 0);
+        self.ui.set_has_heatmap(heatmap_total > 0);
 
         // Application rows, including the current live interval.
-        let total_apps = day_agg.apps.len();
+        let total_apps = day_totals.apps.len();
         let query_lower = self.query.to_lowercase();
-        let top = day_agg.apps.first().map(|(_, v)| *v).unwrap_or(1).max(1);
+        let top = day_totals.apps.first().map(|(_, v)| *v).unwrap_or(1).max(1);
         let mut app_rows = Vec::new();
-        for (app_id, seconds) in &day_agg.apps {
+        for (app_id, seconds) in &day_totals.apps {
             let Some(info) = app_infos.get(app_id) else {
                 continue;
             };
@@ -691,21 +724,29 @@ impl AppController {
         );
         self.ui.set_apps(ModelRc::new(VecModel::from(app_rows)));
 
-        let max_hour = day_agg.hourly.iter().copied().max().unwrap_or(0).max(1);
-        let hours: Vec<HourBar> = day_agg
-            .hourly
-            .iter()
-            .map(|v| HourBar {
-                ratio: (*v as f32 / max_hour as f32).clamp(0.0, 1.0),
-            })
-            .collect();
+        let hours: Vec<HourBar> = if totals_only {
+            Vec::new()
+        } else {
+            let max_hour = day_agg.hourly.iter().copied().max().unwrap_or(0).max(1);
+            day_agg
+                .hourly
+                .iter()
+                .map(|v| HourBar {
+                    ratio: (*v as f32 / max_hour as f32).clamp(0.0, 1.0),
+                })
+                .collect()
+        };
         self.ui.set_hours(ModelRc::new(VecModel::from(hours)));
         self.ui.set_peak_text(
-            day_agg
-                .peak_hour()
-                .map(|(h, _)| peak_label(h as u32))
-                .unwrap_or_else(|| "No activity yet".into())
-                .into(),
+            if totals_only {
+                "Totals only".to_string()
+            } else {
+                day_agg
+                    .peak_hour()
+                    .map(|(h, _)| peak_label(h as u32))
+                    .unwrap_or_else(|| "No activity yet".into())
+            }
+            .into(),
         );
 
         // History: a calm, scannable two-week list.
@@ -822,7 +863,14 @@ impl AppController {
         self.ui.set_pause_status(status.into());
     }
 
-    fn comparison_text(&self, rows: &[SessionRow], day: Day, total: i64, store: &Store) -> String {
+    fn comparison_text(
+        &self,
+        rows: &[SessionRow],
+        rollups: &[RollupTotal],
+        day: Day,
+        total: i64,
+        store: &Store,
+    ) -> String {
         if total <= 0 {
             if !store.has_any_sessions() && self.selected_offset == 0 {
                 return "Nothing recorded yet — usage will appear as you work.".into();
@@ -834,7 +882,7 @@ impl AppController {
             };
         }
         let yesterday = day.add_days(-1);
-        let previous = stats::total_for_day(rows, yesterday);
+        let previous = stats::total_with_rollups(rows, rollups, yesterday);
         let relation = if self.selected_offset == 0 {
             "yesterday"
         } else {
@@ -852,7 +900,7 @@ impl AppController {
             );
         }
         // Only use an average when there is enough real history to mean it.
-        let prior = stats::totals_ending_at(rows, yesterday, 7);
+        let prior = stats::totals_ending_at_with_rollups(rows, rollups, yesterday, 7);
         if let Some(avg) = stats::active_day_average(&prior, 3) {
             let diff = total - avg;
             if diff.abs() < 300 {
