@@ -859,6 +859,7 @@ impl AppController {
             TrackingStatus::Waiting => "Waiting for GNOME".into(),
             TrackingStatus::Stale => "Tracking stopped".into(),
             TrackingStatus::Error => "Something needs attention".into(),
+            TrackingStatus::Capped => "Audio or video cap".into(),
         }
     }
 
@@ -908,7 +909,9 @@ impl AppController {
                 "Try again",
                 2,
             ),
-            TrackingStatus::Active | TrackingStatus::Away => (false, "", "", "", 0),
+            TrackingStatus::Active | TrackingStatus::Away | TrackingStatus::Capped => {
+                (false, "", "", "", 0)
+            }
         };
         let show = show && !self.setup_open && !self.settings_open;
         self.ui.set_show_banner(show);

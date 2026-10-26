@@ -27,6 +27,9 @@ pub enum TrackingStatus {
     Waiting,
     Stale,
     Error,
+    /// Audio or an idle inhibitor held the session open until the two-hour
+    /// cap. No new session starts until input returns.
+    Capped,
 }
 
 impl TrackingStatus {
@@ -39,6 +42,59 @@ impl TrackingStatus {
             TrackingStatus::Waiting => 4,
             TrackingStatus::Stale => 5,
             TrackingStatus::Error => 6,
+            TrackingStatus::Capped => 7,
+        }
+    }
+}
+
+/// What kept a session open besides, or instead of, recent input. The value
+/// is monotonic: `Input` can be upgraded but never downgraded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Presence {
+    #[default]
+    Input,
+    Inhibitor,
+    Audio,
+    Mixed,
+}
+
+impl Presence {
+    pub fn from_flags(inhibited: bool, audio: bool) -> Self {
+        match (inhibited, audio) {
+            (true, true) => Presence::Mixed,
+            (true, false) => Presence::Inhibitor,
+            (false, true) => Presence::Audio,
+            (false, false) => Presence::Input,
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Presence::Input => "input",
+            Presence::Inhibitor => "inhibitor",
+            Presence::Audio => "audio",
+            Presence::Mixed => "mixed",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Presence::Input => "input",
+            Presence::Inhibitor => "an inhibitor is active",
+            Presence::Audio => "audio is playing",
+            Presence::Mixed => "audio and an inhibitor are active",
+        }
+    }
+
+    fn merge(self, other: Presence) -> Presence {
+        match (self, other) {
+            (Presence::Mixed, _) | (_, Presence::Mixed) => Presence::Mixed,
+            (Presence::Input, value) | (value, Presence::Input) => value,
+            (Presence::Audio, Presence::Inhibitor) | (Presence::Inhibitor, Presence::Audio) => {
+                Presence::Mixed
+            }
+            (Presence::Audio, Presence::Audio) => Presence::Audio,
+            (Presence::Inhibitor, Presence::Inhibitor) => Presence::Inhibitor,
         }
     }
 }
@@ -51,6 +107,7 @@ pub struct LiveCurrent {
     pub icon: Option<String>,
     pub started: i64,
     pub elapsed: i64,
+    pub presence: Presence,
 }
 
 #[derive(Clone, Debug)]
@@ -178,6 +235,14 @@ struct ExtensionState {
     away_since: i64,
     idle: bool,
     locked: bool,
+    inhibited: bool,
+    audio: bool,
+    /// Milliseconds since the last input, as measured by Mutter.
+    idle_ms: i64,
+    /// The configured idle threshold the extension used, in seconds.
+    idle_seconds: i64,
+    /// The extension's write time in milliseconds since the Unix epoch.
+    stamp: i64,
 }
 
 struct StateReader {
@@ -256,6 +321,27 @@ fn parse_state(text: &str) -> Option<ExtensionState> {
             .get("locked")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        inhibited: value
+            .get("inhibited")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        audio: value
+            .get("audio")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        // idle_ms is always milliseconds. No unit heuristic is safe here:
+        // two hours of idleness is a legitimate value.
+        idle_ms: value
+            .get("idle_ms")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .max(0),
+        idle_seconds: value
+            .get("idle_seconds")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(300)
+            .max(1),
+        stamp: value.get("stamp").and_then(|v| v.as_i64()).unwrap_or(0),
     })
 }
 
@@ -267,6 +353,79 @@ const NOISE_FLOOR_SECS: i64 = 5;
 /// Small slack for comparing the stored end of the previous session with the
 /// start of the next one: integer-second accounting can differ by one.
 const CONTIGUOUS_SLACK: i64 = 1;
+
+/// Audio playback and idle inhibitors may keep a session open without input,
+/// but never for longer than this from the last real input.
+const PRESENCE_CAP_SECS: i64 = 2 * 60 * 60;
+
+/// The pure presence decision, in precedence order: lock and idle always win,
+/// then a latched cap stays until input returns, then audio/inhibitor holds the
+/// session open for up to two hours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PresenceAction {
+    /// Away, locked or idle. The caller closes the session as usual. A cap
+    /// latch, if any, survives this branch.
+    Away,
+    Track(Presence),
+    Capped {
+        presence: Presence,
+        capped_at: i64,
+    },
+    /// The cap was already reached; audio or the inhibitor may have stopped,
+    /// but no new session starts until input returns.
+    StayCapped,
+}
+
+fn presence_action(latched: bool, state: &ExtensionState, now: i64) -> PresenceAction {
+    if state.away || state.locked || state.idle {
+        return PresenceAction::Away;
+    }
+    let presence = Presence::from_flags(state.inhibited, state.audio);
+    let input_returned = state.idle_ms < state.idle_seconds.saturating_mul(1000);
+    if latched {
+        return if input_returned {
+            PresenceAction::Track(presence)
+        } else {
+            PresenceAction::StayCapped
+        };
+    }
+    if presence == Presence::Input {
+        return PresenceAction::Track(Presence::Input);
+    }
+    let observed = if state.stamp > 10_000_000_000 {
+        state.stamp / 1000
+    } else if state.stamp > 1_000_000_000 {
+        state.stamp
+    } else {
+        now
+    };
+    let last_input = observed.saturating_sub(state.idle_ms / 1000);
+    let capped_at = last_input.saturating_add(PRESENCE_CAP_SECS);
+    if now >= capped_at {
+        PresenceAction::Capped {
+            presence,
+            capped_at,
+        }
+    } else {
+        PresenceAction::Track(presence)
+    }
+}
+
+fn cap_detail(presence: Presence) -> String {
+    format!(
+        "{} kept the session open for two hours without input. New time starts when input returns.",
+        match presence {
+            Presence::Audio => "Audio playback",
+            Presence::Inhibitor => "An idle inhibitor",
+            Presence::Mixed => "Audio and an idle inhibitor",
+            Presence::Input => "Audio or an idle inhibitor",
+        }
+    )
+}
+
+fn capped_wait_detail() -> &'static str {
+    "The audio or inhibitor cap is reached. New time starts when input returns."
+}
 
 /// The companion writes on every focus, idle and lock change and sends a
 /// heartbeat every 15 seconds. An inotify wake handles those at once; this is
@@ -471,6 +630,7 @@ struct PrevSession {
     key: String,
     started: i64,
     ended: i64,
+    presence: Presence,
     /// False after a close caused by a gap, being away, a stale state file, a
     /// pause, or a midnight split: the time after such a close is never
     /// counted as belonging to this row.
@@ -486,6 +646,7 @@ struct OpenSession {
     started: i64,
     accumulated: i64,
     last_heartbeat: i64,
+    presence: Presence,
 }
 
 struct Tracker {
@@ -507,6 +668,9 @@ struct Tracker {
     ever_saw_state: bool,
     last_status: TrackingStatus,
     last_detail: String,
+    /// Set when audio/inhibitor reached the two-hour cap. It survives an
+    /// inhibitor or player stopping and clears only when input returns.
+    presence_capped: bool,
 }
 
 fn resolve_key(focus: &ExtensionFocus) -> String {
@@ -559,6 +723,7 @@ impl Tracker {
             ever_saw_state,
             last_status: status,
             last_detail: detail,
+            presence_capped: false,
         }
     }
 
@@ -584,6 +749,7 @@ impl Tracker {
             icon: s.icon.clone(),
             started: s.started,
             elapsed: s.accumulated,
+            presence: s.presence,
         });
         if let Ok(mut live) = self.handle.live.lock() {
             live.current = current;
@@ -662,6 +828,7 @@ impl Tracker {
                 key: session.key,
                 started: session.started,
                 ended: end,
+                presence: session.presence,
                 mergeable,
             });
         }
@@ -675,7 +842,7 @@ impl Tracker {
     /// interruption, continue the previous row instead of writing a second
     /// adjacent row for the same app. Never spans a midnight or a branch that
     /// marked the previous session unmergeable.
-    fn try_resume_previous(&mut self, app: &ResolvedApp, now: i64) -> bool {
+    fn try_resume_previous(&mut self, app: &ResolvedApp, now: i64, presence: Presence) -> bool {
         let Some(prev) = self.previous.take() else {
             return false;
         };
@@ -705,12 +872,13 @@ impl Tracker {
             started: prev.started,
             accumulated: prev.ended - prev.started,
             last_heartbeat: prev.ended,
+            presence: prev.presence.merge(presence),
         });
         self.publish_current();
         true
     }
 
-    fn start_session(&mut self, app: ResolvedApp, now: i64) {
+    fn start_session(&mut self, app: ResolvedApp, now: i64, presence: Presence) {
         let app_id = match self.store.upsert_app(&app, now) {
             Ok(id) => id,
             Err(e) => {
@@ -732,6 +900,7 @@ impl Tracker {
                     started: now,
                     accumulated: 0,
                     last_heartbeat: now,
+                    presence,
                 });
                 self.publish_current();
             }
@@ -874,28 +1043,54 @@ impl Tracker {
             );
             return;
         }
-        if state.away {
-            if self.current.is_some() {
-                let end = if state.away_since > 0 {
-                    state.away_since.min(now_wall)
+        let presence = match presence_action(self.presence_capped, &state, now_wall) {
+            PresenceAction::Away => {
+                if self.current.is_some() {
+                    let end = if state.away_since > 0 {
+                        state.away_since.min(now_wall)
+                    } else {
+                        self.current
+                            .as_ref()
+                            .map(|s| s.started + s.accumulated)
+                            .unwrap_or(now_wall)
+                    };
+                    self.close_current(end, false);
+                }
+                let detail = if state.locked {
+                    "The screen is locked"
+                } else if state.idle {
+                    "No input for a while"
                 } else {
-                    self.current
-                        .as_ref()
-                        .map(|s| s.started + s.accumulated)
-                        .unwrap_or(now_wall)
+                    "Away from the computer"
                 };
-                self.close_current(end, false);
+                self.set_status(TrackingStatus::Away, detail);
+                return;
             }
-            let detail = if state.locked {
-                "The screen is locked"
-            } else if state.idle {
-                "No input for a while"
-            } else {
-                "Away from the computer"
-            };
-            self.set_status(TrackingStatus::Away, detail);
-            return;
-        }
+            PresenceAction::StayCapped => {
+                if let Some(session) = &self.current {
+                    let end = session.started + session.accumulated;
+                    self.close_current(end, false);
+                }
+                self.presence_capped = true;
+                self.set_status(TrackingStatus::Capped, capped_wait_detail());
+                return;
+            }
+            PresenceAction::Capped {
+                presence,
+                capped_at,
+            } => {
+                if self.current.is_some() {
+                    self.close_current(capped_at, false);
+                }
+                self.presence_capped = true;
+                self.set_status(TrackingStatus::Capped, cap_detail(presence));
+                return;
+            }
+            PresenceAction::Track(presence) => {
+                self.presence_capped = false;
+                presence
+            }
+        };
         let Some(focus) = state.focus else {
             if let Some(session) = &self.current {
                 let end = session.started + session.accumulated;
@@ -934,12 +1129,13 @@ impl Tracker {
                 };
                 self.close_current(end, !crossed_midnight);
             }
-            if crossed_midnight || !self.try_resume_previous(&app, now_wall) {
-                self.start_session(app.clone(), now_wall);
+            if crossed_midnight || !self.try_resume_previous(&app, now_wall, presence) {
+                self.start_session(app.clone(), now_wall, presence);
             }
         } else {
             let mut heartbeat = None;
             let published = if let Some(session) = &mut self.current {
+                session.presence = session.presence.merge(presence);
                 session.accumulated = session.accumulated.saturating_add(delta);
                 let end = session.started.saturating_add(session.accumulated);
                 if end - session.last_heartbeat >= 30 {
@@ -953,6 +1149,7 @@ impl Tracker {
                     icon: session.icon.clone(),
                     started: session.started,
                     elapsed: session.accumulated,
+                    presence: session.presence,
                 })
             } else {
                 None
@@ -972,7 +1169,11 @@ impl Tracker {
                 }
             }
         }
-        let detail = format!("Tracking {}", app.name);
+        let detail = if presence == Presence::Input {
+            format!("Tracking {}", app.name)
+        } else {
+            format!("Tracking {} — {}", app.name, presence.label())
+        };
         self.set_status(TrackingStatus::Active, detail);
     }
 }
@@ -1281,6 +1482,7 @@ mod tests {
             ever_saw_state: false,
             last_status: TrackingStatus::Active,
             last_detail: String::new(),
+            presence_capped: false,
         }
     }
 
@@ -1474,6 +1676,7 @@ mod tests {
             key: app.key,
             started,
             ended,
+            presence: Presence::Input,
             mergeable,
         });
     }
@@ -1491,6 +1694,7 @@ mod tests {
             started,
             accumulated: 0,
             last_heartbeat: started,
+            presence: Presence::Input,
         });
     }
 

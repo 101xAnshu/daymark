@@ -112,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 icon: Some("brave-browser".into()),
                 started: now - 23 * 60,
                 elapsed: 23 * 60,
+                presence: daymark::tracker::Presence::Input,
             });
         }
     }
