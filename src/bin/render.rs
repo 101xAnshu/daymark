@@ -100,6 +100,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings.theme = ThemePref::Light;
     }
     let tracker = TrackerHandle::demo(settings.clone(), handle_status, detail);
+    if state == "now" {
+        // A live session lets the screenshot exercises the Now metric without
+        // touching the seeded database.
+        let now = daymark::date::unix_now();
+        if let Ok(mut live) = tracker.live.lock() {
+            live.current = Some(daymark::tracker::LiveCurrent {
+                app_id: 1,
+                key: "brave-browser.desktop".into(),
+                name: "Brave Web Browser".into(),
+                icon: Some("brave-browser".into()),
+                started: now - 23 * 60,
+                elapsed: 23 * 60,
+            });
+        }
+    }
 
     let scale = 1.0f32;
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
@@ -121,6 +136,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "rhythm" => ctl.set_view_for_render(2),
             "light-rhythm" => ctl.set_view_for_render(2),
             "rhythm-empty" => ctl.set_view_for_render(2),
+            "timeline" => {}
+            "timeline-empty" => ctl.set_selected_for_render(-9),
+            "now" => {}
             "settings" | "dark-settings" | "light-settings" => ctl.open_settings_for_render(),
             "delete" => {
                 ctl.open_settings_for_render();
