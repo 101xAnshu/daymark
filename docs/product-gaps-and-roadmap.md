@@ -13,9 +13,10 @@ The product should be reliable, private, native, and easy to install and keep ru
   the first-run flow, and the corrected footprint claims.
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --lib`
   pass; the library has **69 tests**.
-- The local `.deb` builds and installs its expected files. The `.rpm` builds in a Fedora 42
-  container. The GitHub workflows have not run yet, so the release artifacts still need one
-  CI pass.
+- The local `.deb` builds and contains its expected files. The `.rpm` builds in a Fedora 42
+  container, but a local install test is blocked because this host's binary requires
+  `GLIBC_2.43`; the workflow builds on Ubuntu 22.04 for the 2.35 floor. The GitHub
+  workflows have not run yet, so the release artifacts still need one CI pass.
 - A 60 second headless run measures about 8 MB RSS, 0.00% CPU, and about 0.5 wakeups/s.
   After the window has been opened and closed, RSS is about 24 MB and the tracker still
   polls. The README states both states separately.
