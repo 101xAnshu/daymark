@@ -53,11 +53,12 @@ The product should be reliable, private, native, and easy to install and keep ru
   (`input`, `inhibitor`, `audio` or `mixed`) without changing rollups or app identity, and
   the Day view shows a quiet presence note under the timeline.
 - The weekly digest is implemented on `v2`: computation, local notification payload,
-  preference persistence, once-a-day delivery through the tracker, and the companion
-  notification consumer. The Settings toggle is still pending.
+  preference persistence, once-a-day delivery through the tracker, the companion
+  notification consumer, and the Settings toggle.
 - The APT-aware update reader is implemented on `v2`: local dpkg status and
-  `apt-cache policy` parsing with numeric version comparison, no network. The UI notice is
-  pending, and there is no APT repository to report against yet.
+  `apt-cache policy` parsing with numeric version comparison, no network, and a quiet
+  Settings notice when a newer candidate exists. There is no APT repository to report
+  against yet.
 - V2 is local only. Nothing on `v2` is pushed until the branch is approved.
 
 ## 1. Executive summary
@@ -315,9 +316,9 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 13. Add a tray with open, pause 15 minutes, pause 1 hour, pause until resumed, and quit.
     The tray icon should show the paused state, and it should reappear when the bar restarts.
 14. Add the 7 by 24 heatmap. **Implemented on `v2` as the Rhythm view.**
-15. Add the weekly digest notification. **Implemented on `v2` except the Settings toggle.**
-16. Add the APT-aware update notice. **Local reader implemented on `v2`; the UI notice and
-    an APT repository remain.**
+15. Add the weekly digest notification. **Implemented on `v2`.**
+16. Add the APT-aware update notice. **Local reader and Settings notice implemented on
+    `v2`; an APT repository remains.**
 17. Write the design token and decision notes, and review animation and transitions.
 18. Add an optional systemd user unit with `Restart=on-failure`. **Implemented on `v2`.**
 19. Build arm64 .deb and .rpm packages. **Implemented on `v2` as cross-built packages from

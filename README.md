@@ -59,6 +59,7 @@ not the headless footprint.
 | A seven-day rhythm view — a 7×24 heatmap of when the week is busy | Streaks, scores or guilt mechanics |
 | A per-app breakdown with real icons and quiet time bars | Window titles, keystrokes, clipboard data or screenshots |
 | Fourteen days of history at a glance | Cloud sync, analytics, telemetry or any network code |
+| An opt-in weekly digest — one local notification on Monday | Email digests or cloud reports |
 | System light/dark that follows GNOME live | A WebView, Electron or Node runtime |
 | A small GNOME companion that publishes one JSON file | A background process that animates or redraws while you are idle |
 
@@ -226,10 +227,11 @@ graphical session.
   smaller headless mode.
 - Search filters the application list by name. Clicking anywhere outside the
   field releases focus.
-- Settings holds the idle timeout, retention, appearance, autostart, pause
-  options (15 minutes, 1 hour, or until resumed), the data folder shortcut, and
-  delete/quit actions. A timed pause ends by itself, even while the window is
-  hidden; a pause without a deadline ends at the next app start.
+- Settings holds the idle timeout, retention, appearance, autostart, the weekly
+  digest toggle, pause options (15 minutes, 1 hour, or until resumed), a local
+  package-update notice, the data folder shortcut, and delete/quit actions. A
+  timed pause ends by itself, even while the window is hidden; a pause without a
+  deadline ends at the next app start.
 
 ## Diagnostics
 
