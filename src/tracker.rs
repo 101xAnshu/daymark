@@ -106,8 +106,21 @@ impl TrackerHandle {
         self.settings.lock().map(|s| s.clone()).unwrap_or_default()
     }
     pub fn set_settings(&self, settings: Settings) {
+        let pause_changed = self
+            .settings
+            .lock()
+            .map(|current| {
+                current.paused != settings.paused
+                    || current.paused_until != settings.paused_until
+            })
+            .unwrap_or(false);
         if let Ok(mut current) = self.settings.lock() {
             *current = settings;
+        }
+        if pause_changed {
+            // A pause or resume takes effect at once instead of at the next
+            // two-second tick, so no further time is counted after a pause.
+            self.wake();
         }
     }
     pub fn stop(&self) {
@@ -461,16 +474,33 @@ impl Tracker {
 
         let settings = self.handle.settings();
         if settings.paused {
-            if self.current.is_some() {
-                let end = self
-                    .current
-                    .as_ref()
-                    .map(|s| s.started + s.accumulated)
-                    .unwrap_or(now_wall);
-                self.close_current(end);
+            if settings.pause_expired(now_wall) {
+                // A timed pause ends on its own, even with the window hidden
+                // or the process in --background. Resume and persist so a
+                // restart agrees; no time was recorded while paused.
+                let mut resumed = settings.clone();
+                resumed.paused = false;
+                resumed.paused_until = 0;
+                if let Err(e) = resumed.save(&self.store) {
+                    self.set_status(
+                        TrackingStatus::Error,
+                        format!("Could not save settings: {e}"),
+                    );
+                }
+                self.handle.set_settings(resumed);
+                // Fall through: this tick resumes tracking normally.
+            } else {
+                if self.current.is_some() {
+                    let end = self
+                        .current
+                        .as_ref()
+                        .map(|s| s.started + s.accumulated)
+                        .unwrap_or(now_wall);
+                    self.close_current(end);
+                }
+                self.set_status(TrackingStatus::Paused, "Tracking is paused");
+                return;
             }
-            self.set_status(TrackingStatus::Paused, "Tracking is paused");
-            return;
         }
 
         if gap && self.current.is_some() {
