@@ -28,7 +28,7 @@ The product should be reliable, private, native, and easy to install and keep ru
 ## V2 progress
 
 - The Rhythm view is implemented on `v2`: a 7×24 heatmap for the last seven days,
-  with hour labels, per-day totals, and a legend. The library has **93 tests**.
+  with hour labels, per-day totals, and a legend. The library has **97 tests**.
 - The Day view now has a metrics row and a 24-hour timeline on `v2`. The metrics row
   reports the longest uninterrupted stretch, distinct apps, time after midnight
   (00:00–05:00), the change from the same weekday last week, and a live Now cell for
@@ -39,13 +39,17 @@ The product should be reliable, private, native, and easy to install and keep ru
   with a 30-second safety check and a 2-second fallback when no watch can be created.
 - Retention rollup is implemented in the store: old sessions fold into daily per-app totals
   before pruning. The history view still needs to read those totals.
+- arm64/aarch64 packages are implemented on `v2`: both package scripts take an architecture
+  option, a CI job cross-builds the arm64 `.deb` and aarch64 `.rpm` with cargo-zigbuild, and
+  the same job install-tests both under QEMU. The free plan has no native arm64 runners, so
+  the packages are not built on arm64 hardware and a live arm64 run is still a separate check.
 - V2 is local only. Nothing on `v2` is pushed until the branch is approved.
 
 ## 1. Executive summary
 
 Daymark already does the core job well. It works on stock GNOME 45 to 50, on Wayland and
 Xorg. It stores no window titles, browser history, or URLs, and it contains no network
-code. It ships as one 8.5 MiB native binary with no WebView and no WebKitGTK or GTK
+code. It ships as one 8.8 MiB native binary with no WebView and no WebKitGTK or GTK
 runtime. The headless process uses about 8 MB, and the background mode creates no window
 or event loop until the interface is requested.
 
@@ -86,7 +90,7 @@ The scorecard records the state before V1. The implemented result is in Current 
 | Install path | `git clone` and `install.sh` | A .deb for Ubuntu and an .rpm for Fedora from GitHub Releases, no build step | P0 |
 | Package quality | None yet | Small .deb and .rpm with a working first run | P0 |
 | Privacy model | No titles, URLs, history, or network | Keep, and keep site data opt-in and domain-only | Keep |
-| Footprint | 8.5 MiB binary, about 8 MB headless, about 24 MB open | Measure both hidden states and keep the native build | Keep |
+| Footprint | 8.8 MiB binary, about 8 MB headless, about 24 MB open | Measure both hidden states and keep the native build | Keep |
 | Capture accuracy | 2 second polling, no noise floor | Event-driven with a 30 second fallback and a 5 second merge | P1 |
 | Idle, lock, suspend | Exact input-stop timestamp and GNOME signals | Keep, and add a presence flag and a cap | Keep and P1 |
 | Pause | Saved boolean with no timed pause | 15 minutes, 1 hour, or until resumed, with a safe resume | P0 |
@@ -169,6 +173,12 @@ workflow creates a draft release and runs `shellcheck`, `cargo fmt --check`,
 `cargo clippy -D warnings`, and `cargo test`. CI passes; the release workflow still needs a
 release tag.
 
+V2 adds arm64 and aarch64 coverage without an arm64 runner. The package scripts accept
+`--arch`, and CI cross-builds the arm64 packages with cargo-zigbuild, checks their
+architecture, and installs them under QEMU. The free plan has no native arm64 runners, so
+the cross build is the only build path; real-hardware installation and runtime behavior
+remain unverified until an arm64 machine or a paid runner is available.
+
 ### App identity and icons
 
 Today, the Shell app id is strong on GNOME, but a window-backed Electron or web app can
@@ -213,7 +223,7 @@ and the README publishes headless and hidden-after-close numbers.
   and Fedora 42 (GNOME 48).
 - The privacy model. No window titles, no browser files, no URLs, and no network code.
 - The native UI. Slint with no WebView, no WebKitGTK or GTK runtime, and AccessKit roles.
-- The single binary. 8.5 MiB, no Node, no Chromium tree, and a simple package.
+- The single binary. 8.8 MiB, no Node, no Chromium tree, and a simple package.
 - Crash and corruption behavior. The 30 second heartbeat, the one-open-row rule, the
   corrupt database quarantine, and monotonic duration accounting.
 - GNOME identity handling. Shell app id, Shell surface filtering, legacy row merge, icon
@@ -280,7 +290,9 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 16. Add the APT-aware update notice.
 17. Write the design token and decision notes, and review animation and transitions.
 18. Add an optional systemd user unit with `Restart=on-failure`. **Implemented on `v2`.**
-19. Build arm64 .deb and .rpm packages.
+19. Build arm64 .deb and .rpm packages. **Implemented on `v2` as cross-built packages from
+    amd64 CI, with QEMU install smoke tests. The free plan has no native arm64 runners, so a
+    real-arm64 check is still pending.**
 
 ### P3 and V3
 
@@ -342,6 +354,9 @@ These choices are fixed for V1.
    open-ended pause resumes at the next app start, which is the next login when autostart
    is on.
 8. Implementation runs on `v1-release`. `main` stays untouched.
+9. arm64 `.deb` and aarch64 `.rpm` packages are cross-built from amd64 runners. The free
+   plan has no native arm64 runners, so CI uses QEMU for install smoke tests and a
+   real-arm64 run stays a separate check.
 
 ## 11. Evidence notes
 
@@ -358,8 +373,9 @@ These choices are fixed for V1.
   inhibitors.
 - `ui/app.slint` holds the day metrics row, 24-hour timeline, week, hourly, history,
   search, settings, first-run, and banner views.
-- The current tree has 93 tests, CI, .deb and .rpm packaging, `doctor`, timed pause, the
-  first-run flow, the noise floor, the Rhythm heatmap, the inotify watch, and the day
-  metrics and timeline. It still has no tray.
+- The current tree has 97 tests, CI, amd64 and arm64 `.deb` packaging, x86_64 and aarch64
+  `.rpm` packaging, `doctor`, timed pause, the first-run flow, the noise floor, the Rhythm
+  heatmap, the inotify watch, the day metrics and timeline, and the weekly digest
+  computation. It still has no tray.
 - This document is the plan and the review record. V1 is merged on `main`; V2 runs on
   `v2`.

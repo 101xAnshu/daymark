@@ -21,7 +21,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-aa5431?style=flat-square" alt="MIT licensed" />
   <img src="https://img.shields.io/badge/GNOME-46--50-aa5431?style=flat-square" alt="GNOME 46 to 50" />
-  <img src="https://img.shields.io/badge/binary-8.5%20MiB-aa5431?style=flat-square" alt="8.5 MB stripped binary" />
+  <img src="https://img.shields.io/badge/binary-8.8%20MiB-aa5431?style=flat-square" alt="8.8 MB stripped binary" />
   <img src="https://img.shields.io/badge/network-none-aa5431?style=flat-square" alt="No network access" />
 </p>
 
@@ -41,7 +41,7 @@ went, and how that compares with your own history. It asks for no account, opens
 no browser engine, makes no network requests, and keeps everything in one small
 SQLite file on the machine in front of you.
 
-The window is a real native app: 8.7 MiB on disk. Started at login with
+The window is a real native app: 8.8 MiB on disk. Started at login with
 `--background`, it opens no window and creates no Slint platform or event loop:
 about 8 MB of memory, 0% idle CPU, and no timed polling while the companion is
 quiet. The tracker waits on an inotify watch and wakes when the companion
@@ -76,17 +76,24 @@ not the headless footprint.
 ## Install
 
 Daymark targets **Ubuntu 24.04+** (GNOME 46+) and **Fedora 42+** (GNOME 48+).
-It has been tested on Ubuntu 26.04 with GNOME Shell 50.1, and the packages are
-built for amd64/x86_64. The `.deb` is built on Ubuntu 22.04 for the glibc 2.35
-floor; Ubuntu 22.04 itself is not a supported runtime because it ships GNOME 42.
-The build includes both the Wayland and X11 window backends.
+It has been tested on Ubuntu 26.04 with GNOME Shell 50.1. Packages are built
+for amd64/x86_64 on Ubuntu 22.04, and the arm64/aarch64 packages are
+cross-built from the same amd64 build environment. The `.deb` keeps the
+glibc 2.35 floor; Ubuntu 22.04 itself is not a supported runtime because it
+ships GNOME 42. The build includes both the Wayland and X11 window backends.
+
+The arm64/aarch64 packages come from cross-compilation on an amd64 runner
+because the free CI plan has no native arm64 runners. CI installs them under
+QEMU for a smoke test. That covers packaging and startup, but a live run on
+real arm64 hardware still needs a separate check.
 
 ### Ubuntu package
 
 Ubuntu 24.04 or newer with GNOME 46 or newer is required. Ubuntu 22.04 ships
 GNOME 42, which the companion does not support.
 
-Download `daymark_<version>_amd64.deb` from the latest release and install it:
+Download `daymark_<version>_amd64.deb` for x86_64 or
+`daymark_<version>_arm64.deb` for arm64 from the latest release and install it:
 
 ```bash
 sudo apt install ./daymark_0.1.1_amd64.deb
@@ -95,7 +102,9 @@ sudo apt install ./daymark_0.1.1_amd64.deb
 ### Fedora package
 
 Fedora 42 or newer with GNOME 48 or newer is required. Download
-`daymark-<version>-1.x86_64.rpm` from the latest release and install it:
+`daymark-<version>-1.x86_64.rpm` for x86_64 or
+`daymark-<version>-1.aarch64.rpm` for arm64 from the latest release and
+install it:
 
 ```bash
 sudo dnf install ./daymark-*.rpm
@@ -109,6 +118,10 @@ your home directory, so package upgrades apply to every user on their own.
 The packages start no service and change no user settings at install time.
 Remove one with `sudo apt remove daymark` or `sudo dnf remove daymark`;
 recorded history is kept in your home directory.
+
+The package scripts default to the host architecture. Pass `--arch arm64` to
+`scripts/build-deb.sh` or `--arch aarch64` to `scripts/build-rpm.sh` for the
+cross build; it needs cargo-zigbuild and Zig.
 
 ### From source
 
@@ -129,7 +142,7 @@ unless you pass `--no-build`.
 
 The release also includes `daymark-<version>-x86_64-linux.tar.gz` for systems
 where a package cannot be used. It contains the release binary and
-`install.sh`:
+`install.sh`. The portable archive is x86_64 only; use a package for arm64:
 
 ```bash
 tar -xzf daymark-0.1.1-x86_64-linux.tar.gz
@@ -339,7 +352,7 @@ created.
 
 ## Verification
 
-- `cargo test --lib`: **93 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **97 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
   across midnight, idle-gap exclusion, per-app totals, day metrics and timeline
   segmentation (empty days, gaps, overlaps, after-midnight and cross-midnight
@@ -356,11 +369,16 @@ created.
   write connection still open, the inotify wait decision (event versus timeout),
   the 30-second watch versus the two-second fallback, the required watch mask,
   and a real watcher waking on a state-file write, an atomic replacement and a
-  deletion, plus wake-pipe interruption, a private runtime directory, and an
-  unwatchable path.
+  deletion, plus wake-pipe interruption, a private runtime directory, an
+  unwatchable path, and the weekly digest computation (app ranking, previous-week
+  delta, due week and summary text).
 - The watch path was exercised with a real inotify watcher against temporary
   runtime directories. The live handoff from a GNOME companion focus change to
   the next tracker tick still needs a session with the companion loaded.
+- The arm64 `.deb` and aarch64 `.rpm` were cross-built locally and installed
+  under QEMU on Ubuntu 24.04 arm64 and Fedora 42 arm64; both ran
+  `daymark --version`. Native arm64 GUI, GNOME and performance behavior remain
+  untested.
 - The release binary was run on a live GNOME 50.1 Wayland session. The window
   reaches GNOME with app id/WM class `daymark`, so the shell matches it to the
   desktop entry and the companion reports `daymark.desktop` instead of an
@@ -398,8 +416,8 @@ sampled before it, so their tracker poll is now event-driven.
 
 | Item | Result |
 | --- | ---: |
-| Stripped executable | **9,140,976 bytes (8.72 MiB)** |
-| Installed application files (binary, icon, entries, extension) | ≈ 9.2 MB |
+| Stripped executable | **9,242,736 bytes (8.81 MiB)** |
+| Installed application files (binary, icon, entries, extension) | ≈ 9.3 MB |
 | Fresh database | 4 KB |
 | Headless RSS (`--background`) | 8.3–9.0 MiB across runs (≈ 8 MB) |
 | Headless CPU, 60 s sample | 0.00% |
