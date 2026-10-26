@@ -5,6 +5,7 @@ pub mod date;
 pub mod db;
 pub mod demo;
 pub mod desktop;
+pub mod diagnostics;
 pub mod instance;
 pub mod json;
 pub mod logging;

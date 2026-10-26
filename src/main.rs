@@ -7,6 +7,7 @@ use slint::ComponentHandle;
 use daymark::AppWindow;
 use daymark::app::AppController;
 use daymark::db::{self, Store};
+use daymark::diagnostics;
 use daymark::instance::{self, COMMAND_NONE, COMMAND_QUIT, InstanceGuard};
 use daymark::settings::{self, Settings};
 use daymark::tracker;
@@ -45,6 +46,14 @@ fn real_main() -> Result<(), String> {
             }
             "--version" | "-V" => {
                 println!("Daymark {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--status" => {
+                println!("{}", diagnostics::status_output());
+                return Ok(());
+            }
+            "doctor" => {
+                print!("{}", diagnostics::doctor_output());
                 return Ok(());
             }
             "--help" | "-h" => {
@@ -188,13 +197,17 @@ fn print_help() {
     println!(
         "Daymark {}\n\
          A quiet screen time journal for GNOME.\n\n\
-         Usage: daymark [options]\n\n\
+         Usage: daymark [options]\n\
+                  daymark doctor\n\n\
          Options:\n\
            --background     start hidden and keep tracking (used at login)\n\
            --quit           stop the running instance\n\
            --setup-tracking install the GNOME companion extension\n\
+           --status         print one line of tracking state for scripts\n\
            --version        print the version\n\
            -h, --help       show this help\n\n\
+         Commands:\n\
+           doctor           read-only database, companion and log check\n\n\
          The window can be reopened from the application grid. Daymark keeps\n\
          tracking while hidden; quit it from Settings.",
         env!("CARGO_PKG_VERSION")
