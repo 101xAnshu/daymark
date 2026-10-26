@@ -1300,10 +1300,148 @@ mod tests {
     }
 
     #[test]
+    fn parses_idle_milliseconds_audio_and_inhibitors() {
+        let text = r#"{"v":3,"seq":2,"stamp":1710000000000,"focus":null,"away":false,"away_since":0,"idle":false,"locked":false,"inhibited":true,"audio":true,"idle_ms":7200000,"idle_seconds":300}"#;
+        let state = parse_state(text).unwrap();
+        assert_eq!(state.idle_ms, 7_200_000);
+        assert_eq!(state.idle_seconds, 300);
+        assert!(state.inhibited);
+        assert!(state.audio);
+        // The stamp is milliseconds; the cap is evaluated in seconds.
+        assert_eq!(
+            presence_action(false, &state, 1_710_000_000),
+            PresenceAction::Capped {
+                presence: Presence::Mixed,
+                capped_at: 1_710_000_000,
+            }
+        );
+    }
+
+    #[test]
+    fn older_state_files_default_to_recent_input() {
+        let text =
+            r#"{"v":1,"focus":null,"away":false,"away_since":0,"idle":false,"locked":false}"#;
+        let state = parse_state(text).unwrap();
+        assert_eq!(state.idle_ms, 0);
+        assert_eq!(state.idle_seconds, 300);
+        assert!(!state.inhibited);
+        assert!(!state.audio);
+        assert_eq!(
+            presence_action(false, &state, 1_710_000_000),
+            PresenceAction::Track(Presence::Input)
+        );
+    }
+
+    #[test]
     fn ignores_malformed_state() {
         assert!(parse_state("not json").is_none());
         assert!(parse_state("{}").is_none());
         assert!(parse_state(r#"{"v":0}"#).is_none());
+    }
+
+    fn presence_state(inhibited: bool, audio: bool, idle_ms: i64, now: i64) -> ExtensionState {
+        ExtensionState {
+            inhibited,
+            audio,
+            idle_ms,
+            idle_seconds: 300,
+            stamp: now.saturating_mul(1000),
+            ..ExtensionState::default()
+        }
+    }
+
+    #[test]
+    fn audio_caps_at_last_input_plus_two_hours() {
+        let now = 1_800_000_000;
+        let state = presence_state(false, true, 3 * 3600 * 1000, now);
+        assert_eq!(
+            presence_action(false, &state, now),
+            PresenceAction::Capped {
+                presence: Presence::Audio,
+                // Last input was three hours ago, so the cap is one hour ago.
+                capped_at: now - 3600,
+            }
+        );
+    }
+
+    #[test]
+    fn exactly_two_hours_reaches_the_cap() {
+        let now = 1_800_000_000;
+        let state = presence_state(true, false, PRESENCE_CAP_SECS * 1000, now);
+        assert_eq!(
+            presence_action(false, &state, now),
+            PresenceAction::Capped {
+                presence: Presence::Inhibitor,
+                capped_at: now,
+            }
+        );
+    }
+
+    #[test]
+    fn recent_input_holds_presence_without_capping() {
+        let now = 1_800_000_000;
+        let state = presence_state(true, true, 60_000, now);
+        assert_eq!(
+            presence_action(false, &state, now),
+            PresenceAction::Track(Presence::Mixed)
+        );
+        let audio = presence_state(false, true, 60_000, now);
+        assert_eq!(
+            presence_action(false, &audio, now),
+            PresenceAction::Track(Presence::Audio)
+        );
+    }
+
+    #[test]
+    fn input_returns_and_clears_a_latched_cap() {
+        let now = 1_800_000_000;
+        let state = presence_state(false, true, 0, now);
+        assert_eq!(
+            presence_action(true, &state, now),
+            PresenceAction::Track(Presence::Audio)
+        );
+        // With no presence at all, the next tick records plain input.
+        let input = presence_state(false, false, 0, now);
+        assert_eq!(
+            presence_action(true, &input, now),
+            PresenceAction::Track(Presence::Input)
+        );
+    }
+
+    #[test]
+    fn a_stopped_player_keeps_the_cap_until_input_returns() {
+        let now = 1_800_000_000;
+        // The cap latched while audio played, then the player stopped. The
+        // idle monitor still reports hours without input.
+        let state = presence_state(false, false, 3 * 3600 * 1000, now);
+        assert_eq!(
+            presence_action(true, &state, now),
+            PresenceAction::StayCapped
+        );
+    }
+
+    #[test]
+    fn lock_and_idle_take_precedence_over_presence() {
+        let now = 1_800_000_000;
+        let mut locked = presence_state(true, true, 3 * 3600 * 1000, now);
+        locked.locked = true;
+        assert_eq!(presence_action(false, &locked, now), PresenceAction::Away);
+        assert_eq!(presence_action(true, &locked, now), PresenceAction::Away);
+
+        let mut idle = presence_state(true, true, 3 * 3600 * 1000, now);
+        idle.idle = true;
+        assert_eq!(presence_action(false, &idle, now), PresenceAction::Away);
+
+        let mut away = presence_state(true, true, 3 * 3600 * 1000, now);
+        away.away = true;
+        assert_eq!(presence_action(false, &away, now), PresenceAction::Away);
+    }
+
+    #[test]
+    fn presence_merges_monotonically() {
+        assert_eq!(Presence::Input.merge(Presence::Audio), Presence::Audio);
+        assert_eq!(Presence::Audio.merge(Presence::Inhibitor), Presence::Mixed);
+        assert_eq!(Presence::Mixed.merge(Presence::Input), Presence::Mixed);
     }
 
     #[test]
@@ -1481,6 +1619,31 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn write_presence_state(
+        path: &std::path::Path,
+        seq: u32,
+        focus: Option<(&str, &str)>,
+        away: bool,
+        away_since: i64,
+        idle_ms: i64,
+        inhibited: bool,
+        audio: bool,
+    ) {
+        let focus_json = match focus {
+            Some((id, name)) => {
+                format!(r#"{{"id":"{id}","name":"{name}","wm_class":null,"pid":null}}"#)
+            }
+            None => "null".to_string(),
+        };
+        let pad = " ".repeat(seq as usize % 7);
+        let body = format!(
+            r#"{{"v":3,"seq":{seq},"stamp":{},"focus":{focus_json},"away":{away},"away_since":{away_since},"idle":{away},"locked":false,"inhibited":{inhibited},"audio":{audio},"idle_ms":{idle_ms},"idle_seconds":300,"pad":"{pad}"}}"#,
+            date::unix_now() * 1000
+        );
+        std::fs::write(path, body).unwrap();
+    }
+
     fn make_tracker(dir: &TempDir) -> Tracker {
         let store = Store::open_at(&dir.db_path()).unwrap();
         let settings = Settings::default();
@@ -1596,6 +1759,101 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].started, start);
         assert_eq!(rows[0].ended, start + 1);
+    }
+
+    #[test]
+    fn audio_closes_at_the_cap_and_waits_for_input() {
+        let dir = TempDir::new("audio-cap");
+        let mut tracker = make_tracker(&dir);
+        let now = date::unix_now();
+        open_fake(&mut tracker, "app:org.example.video", now - 4 * 3600);
+        let db_id = tracker.current.as_ref().unwrap().db_id;
+
+        // A prior tick with recent input marks the open row as audio-backed.
+        write_presence_state(
+            &dir.state_path(),
+            1,
+            Some(("org.example.Video", "Video")),
+            false,
+            0,
+            0,
+            false,
+            true,
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        tracker.tick();
+        assert_eq!(tracker.current.as_ref().unwrap().presence, Presence::Audio);
+        assert_eq!(
+            tracker.store.session_presence(db_id).as_deref(),
+            Some("audio")
+        );
+
+        // Three hours without input: the row must end at last input + 2h.
+        let state_now = date::unix_now();
+        write_presence_state(
+            &dir.state_path(),
+            2,
+            Some(("org.example.Video", "Video")),
+            false,
+            0,
+            3 * 3600 * 1000,
+            false,
+            true,
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        tracker.tick();
+        assert!(tracker.current.is_none());
+        assert_eq!(tracker.last_status, TrackingStatus::Capped);
+        assert!(tracker.last_detail.contains("two hours"));
+        let rows = rows(&tracker);
+        assert_eq!(rows.len(), 1, "rows: {rows:?}");
+        assert!(
+            (rows[0].ended - (state_now - 3600)).abs() <= 1,
+            "cap should end at last input + 2h, got {} for {state_now}",
+            rows[0].ended
+        );
+        assert_eq!(
+            tracker.store.session_presence(db_id).as_deref(),
+            Some("audio")
+        );
+
+        // No new row starts while input stays away, even though the cap is
+        // already latched and the player is still reporting.
+        write_presence_state(
+            &dir.state_path(),
+            3,
+            Some(("org.example.Video", "Video")),
+            false,
+            0,
+            3 * 3600 * 1000,
+            false,
+            true,
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        tracker.tick();
+        assert!(tracker.current.is_none());
+        assert_eq!(tracker.store.session_count(), 1);
+
+        // Input returns: tracking starts a fresh row with the audio presence.
+        write_presence_state(
+            &dir.state_path(),
+            4,
+            Some(("org.example.Video", "Video")),
+            false,
+            0,
+            0,
+            false,
+            true,
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        tracker.tick();
+        let current = tracker.current.as_ref().unwrap();
+        assert_eq!(current.presence, Presence::Audio);
+        assert_eq!(
+            tracker.store.session_presence(current.db_id).as_deref(),
+            Some("audio")
+        );
+        assert_eq!(tracker.last_status, TrackingStatus::Active);
     }
 
     #[test]

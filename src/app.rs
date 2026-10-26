@@ -1581,3 +1581,16 @@ fn pause_status_line(paused: bool, remaining: i64) -> String {
         "Paused until you resume".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::presence_note;
+
+    #[test]
+    fn presence_note_is_quiet_and_hidden_at_zero() {
+        assert_eq!(presence_note(0), "");
+        assert_eq!(presence_note(-10), "");
+        assert_eq!(presence_note(12 * 60), "12m with audio or a video playing");
+        assert_eq!(presence_note(3600), "1h with audio or a video playing");
+    }
+}
