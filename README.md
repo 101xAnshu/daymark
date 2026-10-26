@@ -330,7 +330,7 @@ created.
 
 ## Verification
 
-- `cargo test --lib`: **84 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **85 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
   across midnight, idle-gap exclusion, per-app totals,
   averages, JSON parsing (including the seconds/milliseconds compatibility
@@ -346,7 +346,8 @@ created.
   write connection still open, the inotify wait decision (event versus timeout),
   the 30-second watch versus the two-second fallback, the required watch mask,
   and a real watcher waking on a state-file write, an atomic replacement and a
-  deletion, plus wake-pipe interruption and an unwatchable path.
+  deletion, plus wake-pipe interruption, a private runtime directory, and an
+  unwatchable path.
 - The watch path was exercised with a real inotify watcher against temporary
   runtime directories. The live handoff from a GNOME companion focus change to
   the next tracker tick still needs a session with the companion loaded.

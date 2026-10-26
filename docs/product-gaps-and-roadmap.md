@@ -28,7 +28,7 @@ The product should be reliable, private, native, and easy to install and keep ru
 ## V2 progress
 
 - The Rhythm view is implemented on `v2`: a 7×24 heatmap for the last seven days,
-  with hour labels, per-day totals, and a legend. The library has **84 tests**.
+  with hour labels, per-day totals, and a legend. The library has **85 tests**.
 - The optional systemd user unit is implemented on `v2`: packages install it, but do not
   enable it. The decision log is in `docs/v2-decisions.md`.
 - The inotify watch is implemented on `v2`: focus changes wake the tracker immediately,
@@ -190,7 +190,7 @@ only before this date" state. Add `tz_offset_min` to sessions and use it in day 
 
 ### Tests and measurement
 
-The tree now has 84 tests covering date handling, storage, recovery, migration, pruning,
+The tree now has 85 tests covering date handling, storage, recovery, migration, pruning,
 daily rollup preservation, settings, single instance, tracker behavior, the inotify watch
 and fallback, the noise floor and merge, timed pause, log rotation, extension selection,
 the first-run decision, autostart consent, seven-day hourly heatmap aggregation, and
@@ -353,7 +353,7 @@ These choices are fixed for V1.
   inhibitors.
 - `ui/app.slint` holds the day, week, hourly, history, search, settings, first-run, and
   banner views.
-- The current tree has 84 tests, CI, .deb and .rpm packaging, `doctor`, timed pause, the
+- The current tree has 85 tests, CI, .deb and .rpm packaging, `doctor`, timed pause, the
   first-run flow, the noise floor, the Rhythm heatmap, and the inotify watch. It still has
   no tray.
 - This document is the plan and the review record. V1 is merged on `main`; V2 runs on
