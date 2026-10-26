@@ -55,6 +55,7 @@ not the headless footprint.
 | You get | You never get |
 | --- | --- |
 | One calm day view — total time, a metrics row, a 24-hour timeline, the week's shape and the day's rhythm | Sign-ups, profiles or a subscription |
+| A totals-only state for days whose raw intervals have aged out, with the day's total and per-app split intact | Invented hourly detail for days that no longer have sessions |
 | A seven-day rhythm view — a 7×24 heatmap of when the week is busy | Streaks, scores or guilt mechanics |
 | A per-app breakdown with real icons and quiet time bars | Window titles, keystrokes, clipboard data or screenshots |
 | Fourteen days of history at a glance | Cloud sync, analytics, telemetry or any network code |
@@ -209,6 +210,11 @@ graphical session.
   network data. When recorded time had audio or an idle inhibitor active, a
   quiet note under the timeline says how much, and the metrics row keeps its
   existing four columns at the 900 px minimum width.
+- Days older than the retention horizon keep their daily total and per-app
+  split. The Day view then shows a quiet **Totals only** state for the timeline
+  and the by-hour chart, and keeps only the metrics a daily total can support:
+  distinct apps and the change from the same weekday last week. No hourly
+  detail is invented.
 - `T` returns to today; `Ctrl+1` / `Ctrl+2` / `Ctrl+3` switch between Day,
   History and Rhythm.
 - Rhythm shows the last seven days as a 7×24 heatmap: rows are days, columns
@@ -293,7 +299,11 @@ change, idle, lock, sleep or pause, and writes a heartbeat every 30 seconds.
 Idle time is trimmed back to the moment the companion says input stopped. Sleep
 and wall-clock jumps accrue nothing because durations use a monotonic clock.
 Sessions that cross midnight are split, and closed intervals are aggregated with
-overlap clamping, so a day's totals always come from stored data.
+overlap clamping, so a day's totals always come from stored data. When retention
+prunes old sessions it first folds their time into daily per-app totals, so the
+day view and the fourteen-day history stay answerable after the raw intervals
+are gone. A day always uses one source: raw intervals when they still exist,
+otherwise the preserved rollup.
 
 GNOME Shell's own surfaces are filtered out: the `gjs` host processes
 (notifications, screen saver), the desktop-icons window, docks and other
@@ -330,8 +340,9 @@ the dashboard says so and links back to setup.
 - Logs: `$XDG_STATE_HOME/daymark/logs` (fallback
   `~/.local/state/daymark/logs`), daily files kept for seven days. They contain
   counts, timings and error text only.
-- Retention: 90 days, 1 year (default), or forever. Pruning removes old sessions
-  and orphaned application rows.
+- Retention: 90 days, 1 year (default), or forever. Pruning folds old sessions
+  into daily per-app totals before deleting the raw intervals, then removes
+  orphaned application rows. The Day view marks those days **Totals only**.
 - No analytics, telemetry, network access, window titles, keystrokes,
   screenshots or clipboard contents.
 
@@ -363,11 +374,13 @@ created.
 
 ## Verification
 
-- `cargo test --lib`: **114 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **120 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
   across midnight, idle-gap exclusion, per-app totals, day metrics and timeline
   segmentation (empty days, gaps, overlaps, after-midnight and cross-midnight
-  sessions), averages, JSON parsing (including the seconds/milliseconds compatibility
+  sessions), averages, raw-and-rollup day merging (raw intervals win, a
+  rolled-up day is totals only, an old empty day stays empty), JSON parsing
+  (including the seconds/milliseconds compatibility
   path), desktop-entry parsing (quoted `Exec`, `NoDisplay`, hidden entries),
   shell-window filtering, SQLite persistence, legacy-row migration, corruption
   recovery, crash recovery, at-most-one-open-session, pruning, daily rollup
@@ -417,10 +430,10 @@ created.
   the state file, advanced its heartbeat, honored the idle threshold, reported
   `away`, and shut down cleanly.
 - Visual states (light, dark, populated, empty, first run, setup, history,
-  presence, settings, error and focused search) were rendered through the
-  application's own software renderer at 1120×780 and 900×620 and inspected.
-  Snapshots are written opaque, so the images in `docs/` display correctly
-  everywhere.
+  history with rolled-up days, totals-only day, presence, settings, error and
+  focused search) were rendered through the application's own software renderer
+  at 1120×780 and 900×620 and inspected. Snapshots are written opaque, so the
+  images in `docs/` display correctly everywhere.
 
 ## Measured results
 
