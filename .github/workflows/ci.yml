@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, test and package
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config lintian shellcheck rpm file
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --locked
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      - name: Build Debian package
+        run: scripts/build-deb.sh --skip-build
+
+      - name: Inspect Debian package
+        run: |
+          dpkg-deb -I dist/daymark_*_amd64.deb
+          dpkg-deb -c dist/daymark_*_amd64.deb
+
+      - name: Lint Debian package
+        run: lintian --fail-on error dist/daymark_*_amd64.deb
+
+      - name: Build RPM package
+        run: scripts/build-rpm.sh --skip-build
+
+      - name: Inspect RPM package
+        run: |
+          rpm -qip dist/daymark-*.rpm
+          rpm -qlp dist/daymark-*.rpm
+
+      - name: ShellCheck scripts
+        run: shellcheck scripts/*.sh install.sh
+
+      - name: RPM install smoke test on Fedora
+        run: |
+          docker run --rm -v "${PWD}/dist:/dist:ro" fedora:42 \
+            sh -c '
+              set -eu
+              dnf install -y --setopt=install_weak_deps=False --setopt=tsflags= /dist/daymark-*.rpm
+              rpm -q daymark
+              test -x /usr/bin/daymark
+              test -f /usr/share/applications/daymark.desktop
+              test -f /usr/share/icons/hicolor/scalable/apps/daymark.svg
+              test -f /usr/share/gnome-shell/extensions/daymark@daymark.app/extension.js
+              test -f /usr/share/doc/daymark/copyright
+            '
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: daymark-packages
+          path: |
+            dist/daymark_*_amd64.deb
+            dist/daymark-*-1.x86_64.rpm
+          if-no-files-found: error

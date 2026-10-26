@@ -14,6 +14,7 @@ use slint::{ComponentHandle, Image, ModelRc, SharedPixelBuffer, VecModel};
 use crate::date::{self, Day};
 use crate::db::{self, AppInfo, Store};
 use crate::instance::{COMMAND_NONE, COMMAND_QUIT, COMMAND_SHOW};
+use crate::logging;
 use crate::settings::{self, Settings, ThemePref};
 use crate::stats::{self, SessionRow};
 use crate::tracker::{self, LiveState, TrackerHandle, TrackingStatus};
@@ -238,6 +239,8 @@ pub struct AppController {
     setup_open: bool,
     setup_ready: bool,
     setup_busy: bool,
+    setup_installed: bool,
+    extension_system_wide: bool,
     setup_job: Arc<Mutex<Option<Result<crate::platform::Capabilities, String>>>>,
     setup_last_check: Instant,
     theme_signal: Arc<AtomicBool>,
@@ -245,6 +248,13 @@ pub struct AppController {
     last_theme_poll: Instant,
     restore_maximized: bool,
     command: Option<Arc<AtomicU8>>,
+    /// Set while the window is hidden to the background. Slint's own
+    /// `is_visible()` stays true for the `hide_without_quitting` backport, so
+    /// the controller tracks the lifecycle itself.
+    window_hidden: bool,
+    /// Seconds left on the current timed pause, or 0 when there is none.
+    pause_remaining: i64,
+    last_pause_status: String,
 }
 
 impl AppController {
@@ -293,6 +303,8 @@ impl AppController {
             setup_open: false,
             setup_ready: false,
             setup_busy: false,
+            setup_installed: false,
+            extension_system_wide: false,
             setup_job: Arc::new(Mutex::new(None)),
             setup_last_check: Instant::now(),
             theme_signal,
@@ -300,6 +312,9 @@ impl AppController {
             last_theme_poll: Instant::now(),
             restore_maximized: false,
             command,
+            window_hidden: false,
+            pause_remaining: 0,
+            last_pause_status: String::new(),
         }));
 
         if let Some(icon) = search_icon() {
@@ -321,7 +336,8 @@ impl AppController {
         self.ui.set_view(self.view);
         self.ui.set_maximized(self.ui.window().is_maximized());
         self.ui.global::<Theme>().set_dark(self.dark);
-        self.ui.set_paused(self.settings.paused);
+        self.sync_pause_from_tracker();
+        self.publish_pause_state();
         self.ui.set_idle_seconds(self.settings.idle_seconds as i32);
         self.ui
             .set_retention_days(self.settings.retention_days as i32);
@@ -331,6 +347,9 @@ impl AppController {
             .set_settings_error(self.settings_error.clone().into());
         self.ui.set_setup_ready(self.setup_ready);
         self.ui.set_setup_busy(self.setup_busy);
+        self.ui.set_setup_installed(self.setup_installed);
+        self.ui
+            .set_extension_system_wide(self.extension_system_wide);
         self.ui.set_tracking_title(self.tracking_title().into());
         self.ui
             .set_tracking_detail(self.last_live.detail.clone().into());
@@ -598,6 +617,53 @@ impl AppController {
         self.force_refresh = false;
     }
 
+    /// The tracker applies a timed pause's expiry on its own thread,
+    /// possibly while the window is hidden. Adopt its pause state so the
+    /// interface reflects a resume that happened in the background.
+    fn sync_pause_from_tracker(&mut self) {
+        let Some(tracker) = &self.tracker else {
+            return;
+        };
+        let live_settings = tracker.settings();
+        if live_settings.paused != self.settings.paused
+            || live_settings.paused_until != self.settings.paused_until
+        {
+            self.settings.paused = live_settings.paused;
+            self.settings.paused_until = live_settings.paused_until;
+        }
+    }
+
+    /// The pause state as the interface should show it: whether tracking
+    /// appears paused, and the seconds left on a timed pause. A deadline
+    /// that has already passed is shown as resumed; the tracker confirms
+    /// it within one tick.
+    fn pause_state(&self) -> (bool, i64) {
+        let settings = &self.settings;
+        if !settings.paused {
+            return (false, 0);
+        }
+        let now = crate::date::unix_now();
+        if settings.paused_until > now {
+            (true, settings.paused_until - now)
+        } else if settings.paused_until == 0 {
+            (true, 0)
+        } else {
+            (false, 0)
+        }
+    }
+
+    /// Push the pause state, including the remaining time of a timed
+    /// pause, to the interface.
+    fn publish_pause_state(&mut self) {
+        let (paused, remaining) = self.pause_state();
+        self.pause_remaining = remaining;
+        self.ui.set_paused(paused);
+        self.ui.set_pause_remaining(remaining as i32);
+        let status = pause_status_line(paused, remaining);
+        self.last_pause_status = status.clone();
+        self.ui.set_pause_status(status.into());
+    }
+
     fn comparison_text(&self, rows: &[SessionRow], day: Day, total: i64, store: &Store) -> String {
         if total <= 0 {
             if !store.has_any_sessions() && self.selected_offset == 0 {
@@ -656,6 +722,15 @@ impl AppController {
     }
 
     fn update_banner(&mut self) {
+        // The pause banner says when a timed pause ends on its own.
+        let paused_body = if self.pause_remaining > 0 {
+            format!(
+                "No new time is being counted. Tracking resumes on its own in {}.",
+                date::format_duration(self.pause_remaining)
+            )
+        } else {
+            "No new time is being counted until you resume.".to_string()
+        };
         let (show, title, body, action, kind) = match self.last_live.status {
             TrackingStatus::NeedsSetup => (
                 true,
@@ -681,7 +756,7 @@ impl AppController {
             TrackingStatus::Paused => (
                 true,
                 "Tracking is paused",
-                "No new time is being counted until you resume.",
+                paused_body.as_str(),
                 "Resume",
                 1,
             ),
@@ -798,6 +873,7 @@ impl AppController {
             controller.borrow().ui.on_resume_tracking(move || {
                 let mut ctl = c.borrow_mut();
                 ctl.settings.paused = false;
+                ctl.settings.paused_until = 0;
                 ctl.save_settings();
                 ctl.force_refresh = true;
                 ctl.refresh();
@@ -836,7 +912,9 @@ impl AppController {
                         .add_days(-(ctl.settings.retention_days as i32))
                         .start_ts();
                     if ctl.settings.retention_days > 0 {
-                        let _ = store.prune_before(cutoff);
+                        if let Err(e) = store.prune_before(cutoff) {
+                            logging::error("retention", &e);
+                        }
                     }
                 }
                 ctl.force_refresh = true;
@@ -874,6 +952,7 @@ impl AppController {
                         ctl.save_settings();
                     }
                     Err(e) => {
+                        logging::error("autostart", &e);
                         ctl.settings.autostart = crate::platform::autostart_installed();
                         ctl.settings_error = e;
                     }
@@ -884,9 +963,15 @@ impl AppController {
         }
         {
             let c = controller.clone();
-            controller.borrow().ui.on_set_paused(move |paused| {
+            // `seconds` is the pause length; 0 means "until resumed".
+            controller.borrow().ui.on_pause_for(move |seconds| {
                 let mut ctl = c.borrow_mut();
-                ctl.settings.paused = paused;
+                ctl.settings.paused = true;
+                ctl.settings.paused_until = if seconds > 0 {
+                    crate::date::unix_now() + seconds as i64
+                } else {
+                    0
+                };
                 ctl.save_settings();
                 ctl.force_refresh = true;
                 ctl.refresh();
@@ -906,6 +991,7 @@ impl AppController {
             controller.borrow().ui.on_open_data(move || {
                 let mut ctl = c.borrow_mut();
                 if let Err(e) = crate::platform::open_data_folder() {
+                    logging::error("open_data_folder", &e);
                     ctl.settings_error = e;
                     ctl.force_refresh = true;
                     ctl.refresh();
@@ -919,7 +1005,9 @@ impl AppController {
                 if let Some(tracker) = &ctl.tracker {
                     tracker.request_reset();
                 } else if let Some(store) = &ctl.store {
-                    let _ = store.delete_all();
+                    if let Err(e) = store.delete_all() {
+                        logging::error("delete_all", &e);
+                    }
                 }
                 ctl.query.clear();
                 ctl.ui.set_search_text("".into());
@@ -933,7 +1021,9 @@ impl AppController {
             controller.borrow().ui.on_hide_window(move || {
                 let mut ctl = c.borrow_mut();
                 ctl.restore_maximized = ctl.ui.window().is_maximized();
-                let _ = ctl.ui.window().hide_without_quitting();
+                if ctl.ui.window().hide_without_quitting().is_ok() {
+                    ctl.window_hidden = true;
+                }
             });
         }
         {
@@ -973,7 +1063,9 @@ impl AppController {
             controller.borrow().ui.window().on_close_requested(move || {
                 if let Ok(mut ctl) = c.try_borrow_mut() {
                     ctl.restore_maximized = ctl.ui.window().is_maximized();
-                    let _ = ctl.ui.window().hide_without_quitting();
+                    if ctl.ui.window().hide_without_quitting().is_ok() {
+                        ctl.window_hidden = true;
+                    }
                 }
                 slint::CloseRequestResponse::KeepWindowShown
             });
@@ -983,6 +1075,7 @@ impl AppController {
     fn save_settings(&mut self) {
         if let Some(store) = &self.store {
             if let Err(e) = self.settings.save(store) {
+                logging::error("save_settings", &e);
                 self.settings_error = format!("Could not save settings: {e}");
             } else {
                 self.settings_error.clear();
@@ -1005,17 +1098,20 @@ impl AppController {
                             self.tracker = Some(tracker::spawn(write_store, self.settings.clone()));
                         }
                         Err(e) => {
+                            logging::error("tracking_database", &e);
                             self.settings_error = e;
                         }
                     }
                 }
                 if let Err(e) = crate::platform::apply_autostart(self.settings.autostart) {
+                    logging::error("autostart", &e);
                     self.settings_error = e;
                 }
                 self.force_refresh = true;
                 self.refresh();
             }
             Err(e) => {
+                logging::error("database", &e);
                 self.load_error = e;
                 self.refresh();
             }
@@ -1039,7 +1135,9 @@ impl AppController {
                     self.theme_signal.store(true, Ordering::Relaxed);
                     let window = self.ui.window();
                     window.set_minimized(false);
-                    let _ = self.ui.show();
+                    if self.ui.show().is_ok() {
+                        self.window_hidden = false;
+                    }
                     if self.restore_maximized {
                         window.set_maximized(true);
                     }
@@ -1050,6 +1148,9 @@ impl AppController {
                 }
                 _ => {}
             }
+        }
+        if self.window_hidden {
+            return;
         }
         if let Some(result) = self.setup_job.lock().ok().and_then(|mut job| job.take()) {
             self.finish_setup(result);
@@ -1071,8 +1172,15 @@ impl AppController {
         if self.ui.get_maximized() != is_maximized {
             self.ui.set_maximized(is_maximized);
         }
-        if !self.ui.window().is_visible() {
-            return;
+        // While a pause runs, refresh when its status line changes — the
+        // remaining time moves a minute at a time.
+        if self.settings.paused {
+            let (paused_now, remaining_now) = self.pause_state();
+            let status = pause_status_line(paused_now, remaining_now);
+            if status != self.last_pause_status {
+                self.last_pause_status = status;
+                self.force_refresh = true;
+            }
         }
         if self.force_refresh {
             self.refresh();
@@ -1136,7 +1244,7 @@ impl AppController {
         self.force_refresh = true;
         self.refresh();
         let job = self.setup_job.clone();
-        std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("daymark-setup".into())
             .spawn(move || {
                 let result = crate::platform::install_extension();
@@ -1144,7 +1252,14 @@ impl AppController {
                     *slot = Some(result);
                 }
             })
-            .ok();
+        {
+            logging::error("setup_thread", &error.to_string());
+            self.setup_busy = false;
+            self.ui.set_setup_busy(false);
+            self.settings_error = "Could not start the setup helper.".into();
+            self.force_refresh = true;
+            self.refresh();
+        }
     }
 
     fn finish_setup(&mut self, result: Result<crate::platform::Capabilities, String>) {
@@ -1153,16 +1268,22 @@ impl AppController {
         match result {
             Ok(caps) => {
                 self.setup_ready = caps.state_fresh;
+                self.setup_installed = caps.extension_enabled;
+                self.extension_system_wide = crate::platform::system_extension_available();
                 self.setup_open = true;
                 self.ui.set_setup_open(true);
                 self.ui.set_setup_ready(caps.state_fresh);
-                self.settings.autostart = true;
-                if let Some(store) = &self.store {
-                    let _ = self.settings.save(store);
+                self.ui.set_setup_installed(self.setup_installed);
+                self.ui
+                    .set_extension_system_wide(self.extension_system_wide);
+                // The Start-at-login toggle in the sheet is the user's
+                // choice; apply it as shown instead of forcing autostart on.
+                if let Err(e) = crate::platform::apply_autostart(self.settings.autostart) {
+                    logging::error("autostart", &e);
                 }
-                let _ = crate::platform::apply_autostart(true);
             }
             Err(e) => {
+                logging::error("extension_install", &e);
                 self.settings_error = e;
             }
         }
@@ -1184,6 +1305,12 @@ impl AppController {
 
     pub fn tracker_handle(&self) -> Option<TrackerHandle> {
         self.tracker.clone()
+    }
+
+    /// Whether the window is hidden to the background. Used by the lifecycle
+    /// timer so it can stop while there is nothing to draw.
+    pub fn window_hidden(&self) -> bool {
+        self.window_hidden
     }
 
     pub fn set_view_for_render(&mut self, view: i32) {
@@ -1209,6 +1336,53 @@ impl AppController {
         self.refresh();
     }
 
+    /// First launch after install: open the setup sheet once, explain the
+    /// one re-login, and offer the Start-at-login toggle. Runs on the UI
+    /// thread and never blocks the rest of the app — the dashboard stays
+    /// interactive behind the sheet. When tracking already works, the first
+    /// run is simply recorded without showing anything. The sheet opens at
+    /// most once: completion is remembered even if the user dismisses it
+    /// without finishing setup.
+    pub fn begin_first_run(&mut self) {
+        if self.setup_open {
+            return;
+        }
+        let caps = crate::platform::capabilities();
+        if !settings::first_run_needed(
+            self.settings.first_run_complete,
+            caps.extension_installed,
+            caps.extension_enabled,
+            caps.state_fresh,
+        ) {
+            self.settings.first_run_complete = true;
+            self.save_settings();
+            return;
+        }
+        self.extension_system_wide = crate::platform::system_extension_available();
+        self.setup_installed = caps.extension_enabled;
+        self.setup_ready = caps.state_fresh;
+        self.setup_open = true;
+        self.settings.first_run_complete = true;
+        self.save_settings();
+        self.ui.set_setup_open(true);
+        self.ui.set_setup_ready(self.setup_ready);
+        self.ui.set_setup_installed(self.setup_installed);
+        self.ui
+            .set_extension_system_wide(self.extension_system_wide);
+        logging::info(
+            "first_run",
+            &format!(
+                "installed={} enabled={} state_fresh={} system_wide={}",
+                caps.extension_installed,
+                caps.extension_enabled,
+                caps.state_fresh,
+                self.extension_system_wide
+            ),
+        );
+        self.force_refresh = true;
+        self.refresh();
+    }
+
     pub fn set_selected_for_render(&mut self, offset: i32) {
         self.selected_offset = offset;
         self.force_refresh = true;
@@ -1220,4 +1394,17 @@ fn today_offset(today: Day, day: Day) -> i32 {
     // Day boundaries are local, so round the difference to the nearest day.
     let diff = day.start_ts() - today.start_ts();
     (diff as f64 / 86_400.0).round() as i32
+}
+
+/// One-line description of the pause state for the settings panel and the
+/// background-resume path: empty while tracking runs.
+fn pause_status_line(paused: bool, remaining: i64) -> String {
+    if !paused {
+        return String::new();
+    }
+    if remaining > 0 {
+        format!("Paused — {} remaining", date::format_duration(remaining))
+    } else {
+        "Paused until you resume".to_string()
+    }
 }
