@@ -671,6 +671,9 @@ struct Tracker {
     /// Set when audio/inhibitor reached the two-hour cap. It survives an
     /// inhibitor or player stopping and clears only when input returns.
     presence_capped: bool,
+    /// The last day the weekly digest was checked, so it runs once a day
+    /// without a second timer thread.
+    last_digest_check: Option<Day>,
 }
 
 fn resolve_key(focus: &ExtensionFocus) -> String {
@@ -724,6 +727,24 @@ impl Tracker {
             last_status: status,
             last_detail: detail,
             presence_capped: false,
+            last_digest_check: None,
+        }
+    }
+
+    fn maybe_digest(&mut self, now_wall: i64) {
+        let today = Day::from_timestamp(now_wall);
+        if self.last_digest_check == Some(today) {
+            return;
+        }
+        self.last_digest_check = Some(today);
+        let mut settings = self.handle.settings();
+        if !settings.digest_enabled {
+            return;
+        }
+        match crate::digest::deliver_if_due(&self.store, &mut settings, today) {
+            Ok(true) => self.handle.set_settings(settings),
+            Ok(false) => {}
+            Err(error) => crate::logging::error("digest", &error),
         }
     }
 
@@ -956,6 +977,7 @@ impl Tracker {
             }
         }
         let now_wall = date::unix_now();
+        self.maybe_digest(now_wall);
         let now_mono = Instant::now();
         let mono_delta = now_mono.duration_since(self.last_tick_mono).as_secs() as i64;
         let wall_delta = now_wall - self.last_tick_wall;
@@ -1688,6 +1710,7 @@ mod tests {
             last_status: TrackingStatus::Active,
             last_detail: String::new(),
             presence_capped: false,
+            last_digest_check: Some(Day::today()),
         }
     }
 
