@@ -79,7 +79,7 @@ jobs:
           docker run --rm -v "${PWD}/dist:/dist:ro" fedora:42 \
             sh -c '
               set -eu
-              dnf install -y --setopt=install_weak_deps=False /dist/daymark-*.rpm
+              dnf install -y --setopt=install_weak_deps=False --setopt=tsflags= /dist/daymark-*.rpm
               rpm -q daymark
               test -x /usr/bin/daymark
               test -f /usr/share/applications/daymark.desktop
