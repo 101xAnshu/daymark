@@ -366,12 +366,12 @@ These choices are fixed for V1.
 - `src/platform.rs` handles autostart and extension install, preferring the packaged
   system-wide copy.
 - `src/instance.rs` holds the show and quit socket.
-- `extension/extension.js` reports focus, idle, shield, and sleep state and queries idle
-  inhibitors.
-- `ui/app.slint` holds the day metrics row, 24-hour timeline, week, hourly, history,
-  search, settings, first-run, and banner views.
-- The current tree has 93 tests, CI, .deb and .rpm packaging, `doctor`, timed pause, the
-  first-run flow, the noise floor, the Rhythm heatmap, the inotify watch, and the day
-  metrics and timeline. It still has no tray.
+- `extension/extension.js` reports focus, idle, shield, sleep, idle milliseconds, idle
+  inhibitors, and session-bus MPRIS playback.
+- `ui/app.slint` holds the day metrics row, 24-hour timeline, presence note, week, hourly,
+  history, search, settings, first-run, and banner views.
+- The current tree has 108 tests, CI, .deb and .rpm packaging, `doctor`, timed pause, the
+  first-run flow, the noise floor, the Rhythm heatmap, the inotify watch, the day metrics
+  and timeline, and the audio/inhibitor presence cap. It still has no tray.
 - This document is the plan and the review record. V1 is merged on `main`; V2 runs on
   `v2`.
