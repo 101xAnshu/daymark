@@ -1,4 +1,6 @@
 /target
+/build
+/dist
 *.log
 media/node_modules
 media/public/score.wav
