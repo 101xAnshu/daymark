@@ -72,10 +72,13 @@ mkdir -p \
     "${BUILD_DIR}/usr/share/applications" \
     "${BUILD_DIR}/usr/share/icons/hicolor/scalable/apps" \
     "${BUILD_DIR}/usr/share/gnome-shell/extensions/${EXT_UUID}" \
-    "${BUILD_DIR}/usr/share/doc/daymark"
+    "${BUILD_DIR}/usr/share/doc/daymark" \
+    "${BUILD_DIR}/usr/lib/systemd/user"
 mkdir -p "${OUT_DIR}"
 
 install -m 0755 "${BINARY}" "${BUILD_DIR}/usr/bin/daymark"
+install -m 0644 packaging/daymark.service \
+    "${BUILD_DIR}/usr/lib/systemd/user/daymark.service"
 install -m 0644 packaging/daymark.desktop \
     "${BUILD_DIR}/usr/share/applications/daymark.desktop"
 install -m 0644 assets/daymark.svg \

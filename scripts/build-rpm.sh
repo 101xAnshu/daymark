@@ -82,6 +82,7 @@ mkdir -p \
     "${STAGE}/usr/share/icons/hicolor/scalable/apps" \
     "${STAGE}/usr/share/gnome-shell/extensions/${EXT_UUID}" \
     "${STAGE}/usr/share/doc/daymark" \
+    "${STAGE}/usr/lib/systemd/user" \
     "${RPMBUILD_DIR}/SOURCES" \
     "${RPMBUILD_DIR}/SPECS" \
     "${RPMBUILD_DIR}/BUILD" \
@@ -89,6 +90,8 @@ mkdir -p \
     "${OUT_DIR}"
 
 install -m 0755 "${BINARY}" "${STAGE}/usr/bin/daymark"
+install -m 0644 packaging/daymark.service \
+    "${STAGE}/usr/lib/systemd/user/daymark.service"
 install -m 0644 packaging/daymark.desktop \
     "${STAGE}/usr/share/applications/daymark.desktop"
 install -m 0644 assets/daymark.svg \

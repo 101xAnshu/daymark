@@ -167,6 +167,19 @@ To remove a source or archive install:
 ./install.sh --uninstall --purge  # deletes local history too
 ```
 
+### Optional systemd user service
+
+The packages also install `daymark.service` in `/usr/lib/systemd/user`, but do
+not enable it. If you prefer systemd over the XDG autostart entry:
+
+```bash
+systemctl --user enable --now daymark.service
+```
+
+Turn off **Start at login** in Settings so only one launcher starts Daymark. The
+unit runs `daymark --background`, restarts on failure, and stops with the
+graphical session.
+
 ## Use
 
 - Click a day in the weekly chart, or use `←` / `→` to move one day.

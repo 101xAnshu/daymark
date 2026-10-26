@@ -29,6 +29,8 @@ The product should be reliable, private, native, and easy to install and keep ru
 
 - The Rhythm view is implemented on `v2`: a 7×24 heatmap for the last seven days,
   with hour labels, per-day totals, and a legend. The library has **71 tests**.
+- The optional systemd user unit is implemented on `v2`: packages install it, but do not
+  enable it. The decision log is in `docs/v2-decisions.md`.
 - V2 is local only. Nothing on `v2` is pushed until the branch is approved.
 
 ## 1. Executive summary
@@ -267,7 +269,7 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 15. Add the weekly digest notification.
 16. Add the APT-aware update notice.
 17. Write the design token and decision notes, and review animation and transitions.
-18. Add an optional systemd user unit with `Restart=on-failure`.
+18. Add an optional systemd user unit with `Restart=on-failure`. **Implemented on `v2`.**
 19. Build arm64 .deb and .rpm packages.
 
 ### P3 and V3

@@ -44,6 +44,7 @@ cp -a . %{buildroot}/
 %{_datadir}/gnome-shell/extensions/daymark@daymark.app/
 %{_docdir}/daymark/copyright
 %{_docdir}/daymark/changelog
+/usr/lib/systemd/user/daymark.service
 
 %changelog
 * Mon Oct 26 2026 Daymark contributors <maintainers@daymark.app> - 0.1.1-1
