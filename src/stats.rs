@@ -92,6 +92,17 @@ pub fn totals_ending_at(rows: &[SessionRow], end: Day, days: i64) -> Vec<(Day, i
         .collect()
 }
 
+/// Hourly totals for `days` consecutive days ending at `end` (inclusive),
+/// oldest first. Each row is a day and each column is a local hour.
+pub fn hourly_ending_at(rows: &[SessionRow], end: Day, days: i64) -> Vec<(Day, [i64; 24])> {
+    (0..days)
+        .map(|i| {
+            let day = end.add_days(-(days - 1 - i) as i32);
+            (day, aggregate_day(rows, day).hourly)
+        })
+        .collect()
+}
+
 /// Average over the days that actually contain usage. `None` when fewer than
 /// three days have data, so the interface never invents a baseline.
 pub fn active_day_average(totals: &[(Day, i64)], minimum_days: usize) -> Option<i64> {
@@ -216,5 +227,41 @@ mod tests {
         assert_eq!(agg.total, 0);
         assert_eq!(agg.peak_hour(), None);
         assert_eq!(agg.hourly.iter().sum::<i64>(), 0);
+    }
+
+    #[test]
+    fn hourly_ending_at_returns_seven_days_oldest_first() {
+        let day = Day::today();
+        let rows = [SessionRow {
+            app_id: 1,
+            started: at(day, 9, 30),
+            ended: at(day, 10, 15),
+        }];
+        let heat = hourly_ending_at(&rows, day, 7);
+        assert_eq!(heat.len(), 7);
+        assert_eq!(heat[0].0, day.add_days(-6));
+        assert_eq!(heat[6].0, day);
+        assert_eq!(heat[6].1[9], 30 * 60);
+        assert_eq!(heat[6].1[10], 15 * 60);
+        assert_eq!(heat[6].1.iter().sum::<i64>(), 45 * 60);
+        assert_eq!(heat[0].1.iter().sum::<i64>(), 0);
+    }
+
+    #[test]
+    fn hourly_ending_at_splits_at_midnight() {
+        let day = Day::today();
+        let next = day.add_days(1);
+        let rows = [SessionRow {
+            app_id: 1,
+            started: at(day, 23, 30),
+            ended: at(next, 0, 30),
+        }];
+        let heat = hourly_ending_at(&rows, next, 2);
+        assert_eq!(heat[0].0, day);
+        assert_eq!(heat[1].0, next);
+        assert_eq!(heat[0].1[23], 30 * 60);
+        assert_eq!(heat[1].1[0], 30 * 60);
+        assert_eq!(heat[0].1.iter().sum::<i64>(), 30 * 60);
+        assert_eq!(heat[1].1.iter().sum::<i64>(), 30 * 60);
     }
 }
