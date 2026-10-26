@@ -6,6 +6,7 @@ pub mod db;
 pub mod demo;
 pub mod desktop;
 pub mod diagnostics;
+pub mod digest;
 pub mod instance;
 pub mod json;
 pub mod logging;
