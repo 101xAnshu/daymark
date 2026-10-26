@@ -3,10 +3,14 @@
 //! non-overlapping intervals.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+
+use inotify::{Inotify, WatchMask};
 
 use crate::date::{self, Day};
 use crate::db::Store;
@@ -78,6 +82,9 @@ pub struct TrackerHandle {
     pub quit: Arc<AtomicBool>,
     reset: Arc<AtomicBool>,
     join: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// Present while the tracker waits on the watch. `unpark` remains the
+    /// fallback when the pipe could not be created.
+    wake_pipe: Arc<Mutex<Option<Arc<WakePipe>>>>,
 }
 
 impl TrackerHandle {
@@ -96,6 +103,7 @@ impl TrackerHandle {
             quit: Arc::new(AtomicBool::new(false)),
             reset: Arc::new(AtomicBool::new(false)),
             join: Arc::new(Mutex::new(None)),
+            wake_pipe: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -118,17 +126,14 @@ impl TrackerHandle {
         }
         if pause_changed {
             // A pause or resume takes effect at once instead of at the next
-            // two-second tick, so no further time is counted after a pause.
+            // event or fallback tick, so no further time is counted after a
+            // pause.
             self.wake();
         }
     }
     pub fn stop(&self) {
         self.quit.store(true, Ordering::Relaxed);
-        if let Ok(slot) = self.join.lock() {
-            if let Some(handle) = slot.as_ref() {
-                handle.thread().unpark();
-            }
-        }
+        self.wake();
     }
     /// Ask the tracker to discard all recorded intervals. It happens on the
     /// tracking thread so an open interval can never be re-created afterwards.
@@ -146,6 +151,11 @@ impl TrackerHandle {
         }
     }
     fn wake(&self) {
+        if let Ok(slot) = self.wake_pipe.lock() {
+            if let Some(pipe) = slot.as_ref() {
+                pipe.wake();
+            }
+        }
         if let Ok(slot) = self.join.lock() {
             if let Some(handle) = slot.as_ref() {
                 handle.thread().unpark();
@@ -257,6 +267,197 @@ const NOISE_FLOOR_SECS: i64 = 5;
 /// Small slack for comparing the stored end of the previous session with the
 /// start of the next one: integer-second accounting can differ by one.
 const CONTIGUOUS_SLACK: i64 = 1;
+
+/// The companion writes on every focus, idle and lock change and sends a
+/// heartbeat every 15 seconds. An inotify wake handles those at once; this is
+/// only the safety net for a missed event.
+const WATCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The pre-watch pace, kept for the fallback when no watch can be installed.
+const FALLBACK_POLL: Duration = Duration::from_secs(2);
+
+/// Close-write covers an in-place write; moved-to, create, delete and attrib
+/// cover an atomic replacement, a deletion and a permission change.
+const WATCH_MASK: WatchMask = WatchMask::CLOSE_WRITE
+    .union(WatchMask::MOVED_TO)
+    .union(WatchMask::CREATE)
+    .union(WatchMask::DELETE)
+    .union(WatchMask::ATTRIB);
+
+/// One tick may credit at most one full watch interval. A larger monotonic
+/// jump is still treated as a gap, so a missed suspend signal cannot turn
+/// sleep into usage.
+const MAX_CREDIT_SECS: i64 = WATCH_TIMEOUT.as_secs() as i64;
+const TICK_GAP_SECS: i64 = MAX_CREDIT_SECS + 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaitOutcome {
+    Event,
+    Timeout,
+}
+
+/// The pure part of the wait decision: a positive poll result is an event,
+/// zero is a timeout, and an error is also retried after the fallback wait.
+fn wait_outcome(ready: libc::c_int) -> WaitOutcome {
+    if ready > 0 {
+        WaitOutcome::Event
+    } else {
+        WaitOutcome::Timeout
+    }
+}
+
+/// How long to block without a filesystem event: the watch safety net when
+/// watching, the legacy poll when falling back.
+fn wait_timeout(watching: bool) -> Duration {
+    if watching {
+        WATCH_TIMEOUT
+    } else {
+        FALLBACK_POLL
+    }
+}
+
+/// A monotonic jump larger than the normal watch interval means the machine
+/// slept, or the process was stalled. A wall-clock jump with a small
+/// monotonic delta means the clock was adjusted. Credit neither.
+fn tick_gap(wall_delta: i64, mono_delta: i64) -> bool {
+    (wall_delta - mono_delta).abs() > 5 || mono_delta > TICK_GAP_SECS
+}
+
+/// A tick credits the elapsed monotonic time, capped at one watch interval,
+/// unless a gap made the elapsed time untrustworthy.
+fn credited_seconds(mono_delta: i64, gap: bool) -> i64 {
+    if gap {
+        0
+    } else {
+        mono_delta.clamp(0, MAX_CREDIT_SECS)
+    }
+}
+
+/// A self-pipe so IPC wakeups interrupt `poll` the same way `unpark` used to
+/// interrupt `park_timeout`.
+struct WakePipe {
+    read: OwnedFd,
+    write: OwnedFd,
+}
+
+impl WakePipe {
+    fn new() -> io::Result<Self> {
+        let mut fds = [0; 2];
+        let result = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        if result == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // The two descriptors are fresh and owned by this object.
+        let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        Ok(Self { read, write })
+    }
+
+    fn wake(&self) {
+        let byte = 1u8;
+        let _ = unsafe {
+            libc::write(
+                self.write.as_raw_fd(),
+                (&byte as *const u8).cast(),
+                std::mem::size_of_val(&byte),
+            )
+        };
+    }
+
+    fn drain(&self) {
+        let mut buffer = [0u8; 64];
+        loop {
+            let read = unsafe {
+                libc::read(
+                    self.read.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
+            };
+            if read <= 0 {
+                break;
+            }
+        }
+    }
+}
+
+/// The runtime-directory watch plus the wake pipe. Without a watch it still
+/// waits on the pipe with the fallback timeout, so IPC stays immediate.
+struct RuntimeWatch {
+    inotify: Option<Inotify>,
+    wake: Arc<WakePipe>,
+}
+
+impl RuntimeWatch {
+    fn new(directory: &Path, wake: Arc<WakePipe>) -> io::Result<Self> {
+        std::fs::create_dir_all(directory)?;
+        let inotify = Inotify::init()?;
+        inotify.watches().add(directory, WATCH_MASK)?;
+        Ok(Self {
+            inotify: Some(inotify),
+            wake,
+        })
+    }
+
+    fn without_watch(wake: Arc<WakePipe>) -> Self {
+        Self {
+            inotify: None,
+            wake,
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        wait_timeout(self.inotify.is_some())
+    }
+
+    fn wait(&mut self, timeout: Duration) -> WaitOutcome {
+        let mut fds = [
+            libc::pollfd {
+                fd: self
+                    .inotify
+                    .as_ref()
+                    .map(AsRawFd::as_raw_fd)
+                    .unwrap_or(-1),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.wake.read.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let millis = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+        let ready = loop {
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
+            if ready < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            break ready;
+        };
+        if fds[1].revents & libc::POLLIN != 0 {
+            self.wake.drain();
+        }
+        if fds[0].revents & libc::POLLIN != 0 {
+            self.drain_events();
+        }
+        wait_outcome(ready)
+    }
+
+    fn drain_events(&mut self) {
+        let Some(inotify) = self.inotify.as_mut() else {
+            return;
+        };
+        let mut buffer = [0u8; 4096];
+        loop {
+            match inotify.read_events(&mut buffer) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
+    }
+}
 
 /// The most recently closed session that may still be extended: a following
 /// short focus merges into it, and an immediate return to the same app
@@ -578,7 +779,7 @@ impl Tracker {
         let wall_delta = now_wall - self.last_tick_wall;
         // A large wall-clock jump with a small monotonic delta means the
         // machine slept, or the clock was adjusted. Credit neither.
-        let gap = (wall_delta - mono_delta).abs() > 5 || mono_delta > 10;
+        let gap = tick_gap(wall_delta, mono_delta);
         self.last_tick_wall = now_wall;
         self.last_tick_mono = now_mono;
 
@@ -626,7 +827,7 @@ impl Tracker {
             self.maybe_prune();
         }
 
-        let delta = if gap { 0 } else { mono_delta.clamp(0, 5) };
+        let delta = credited_seconds(mono_delta, gap);
 
         let polled = self.reader.poll();
         let Some((state, age)) = polled else {
@@ -774,12 +975,22 @@ impl Tracker {
 }
 
 pub fn spawn(store: Store, settings: Settings) -> TrackerHandle {
+    let wake_pipe = match WakePipe::new() {
+        Ok(pipe) => Some(Arc::new(pipe)),
+        Err(error) => {
+            eprintln!(
+                "daymark: could not create the tracker wake pipe ({error}); using the two-second fallback poll"
+            );
+            None
+        }
+    };
     let handle = TrackerHandle {
         live: Arc::new(Mutex::new(LiveState::default())),
         settings: Arc::new(Mutex::new(settings)),
         quit: Arc::new(AtomicBool::new(false)),
         reset: Arc::new(AtomicBool::new(false)),
         join: Arc::new(Mutex::new(None)),
+        wake_pipe: Arc::new(Mutex::new(wake_pipe.clone())),
     };
     let thread_handle = handle.clone();
     let join_slot = handle.join.clone();
@@ -787,12 +998,34 @@ pub fn spawn(store: Store, settings: Settings) -> TrackerHandle {
         .name("daymark-tracker".into())
         .spawn(move || {
             let mut tracker = Tracker::new(store, thread_handle.clone());
+            let state_path = platform::state_path();
+            let directory = state_path.parent().unwrap_or_else(|| Path::new("."));
+            let mut watch = wake_pipe.map(|pipe| {
+                // A watch on the runtime directory covers both an in-place
+                // write and the temporary-file rename the companion uses for
+                // an atomic replacement.
+                match RuntimeWatch::new(directory, pipe.clone()) {
+                    Ok(watch) => watch,
+                    Err(error) => {
+                        eprintln!(
+                            "daymark: could not watch the runtime directory ({error}); using the two-second fallback poll"
+                        );
+                        RuntimeWatch::without_watch(pipe)
+                    }
+                }
+            });
             while !thread_handle.quit.load(Ordering::Relaxed) {
                 tracker.tick();
-                // Two seconds is forgiving enough for input/idle transitions
-                // while waking the CPU only 30 times a minute. `park_timeout`
-                // is interrupted immediately by `stop()`/`request_reset()`.
-                std::thread::park_timeout(Duration::from_secs(2));
+                match watch.as_mut() {
+                    Some(watch) => {
+                        // An inotify event wakes this at once. The timeout is
+                        // the 30-second safety net for a missed event, or the
+                        // old two-second poll when no watch could be made.
+                        let timeout = watch.timeout();
+                        watch.wait(timeout);
+                    }
+                    None => std::thread::park_timeout(FALLBACK_POLL),
+                }
             }
             if let Some(session) = &tracker.current {
                 let end = session.started + session.accumulated;
@@ -844,6 +1077,124 @@ mod tests {
         assert!(parse_state("not json").is_none());
         assert!(parse_state("{}").is_none());
         assert!(parse_state(r#"{"v":0}"#).is_none());
+    }
+
+    #[test]
+    fn wait_decision_distinguishes_events_from_timeouts() {
+        assert_eq!(wait_outcome(1), WaitOutcome::Event);
+        assert_eq!(wait_outcome(2), WaitOutcome::Event);
+        assert_eq!(wait_outcome(0), WaitOutcome::Timeout);
+        assert_eq!(wait_outcome(-1), WaitOutcome::Timeout);
+    }
+
+    #[test]
+    fn the_watch_waits_longer_than_the_fallback() {
+        assert_eq!(wait_timeout(true), Duration::from_secs(30));
+        assert_eq!(wait_timeout(false), Duration::from_secs(2));
+        assert!(wait_timeout(true) > wait_timeout(false));
+    }
+
+    #[test]
+    fn the_watch_covers_replacement_and_deletion() {
+        for event in [
+            WatchMask::CLOSE_WRITE,
+            WatchMask::MOVED_TO,
+            WatchMask::CREATE,
+            WatchMask::DELETE,
+            WatchMask::ATTRIB,
+        ] {
+            assert!(WATCH_MASK.contains(event), "missing {event:?}");
+        }
+    }
+
+    #[test]
+    fn a_heartbeat_interval_is_credited_in_full() {
+        // The companion sends a heartbeat every 15 seconds, so a tick may be
+        // that far apart without being treated as a stall.
+        assert!(!tick_gap(15, 15));
+        assert_eq!(credited_seconds(15, false), 15);
+        assert!(!tick_gap(30, 30));
+        assert_eq!(credited_seconds(30, false), 30);
+        // A late tick is capped at one watch interval.
+        assert_eq!(credited_seconds(45, false), MAX_CREDIT_SECS);
+        // A stalled process or a sleeping machine earns no credit.
+        assert!(tick_gap(36, 36));
+        assert!(tick_gap(3600, 5));
+        assert!(tick_gap(5, 3600));
+        assert_eq!(credited_seconds(45, true), 0);
+    }
+
+    #[test]
+    fn a_real_watch_wakes_on_a_state_file_write() {
+        let dir = TempDir::new("watch-write");
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let mut watch = RuntimeWatch::new(&dir.0, wake).unwrap();
+        assert_eq!(watch.timeout(), WATCH_TIMEOUT);
+        write_state(
+            &dir.state_path(),
+            1,
+            Some(("org.example.Alpha", "Alpha")),
+            false,
+            0,
+        );
+        assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
+        // With no further change the watch falls through to its timeout.
+        assert_eq!(
+            watch.wait(Duration::from_millis(150)),
+            WaitOutcome::Timeout
+        );
+    }
+
+    #[test]
+    fn a_real_watch_wakes_on_atomic_replacement_and_deletion() {
+        let dir = TempDir::new("watch-replace");
+        std::fs::write(dir.state_path(), "{}").unwrap();
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let mut watch = RuntimeWatch::new(&dir.0, wake).unwrap();
+        let temporary = dir.0.join("state.json.tmp");
+        std::fs::write(&temporary, "{}").unwrap();
+        std::fs::rename(&temporary, dir.state_path()).unwrap();
+        assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
+        std::fs::remove_file(dir.state_path()).unwrap();
+        assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
+    }
+
+    #[test]
+    fn the_wake_pipe_interrupts_a_long_wait() {
+        let dir = TempDir::new("watch-wake");
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let mut watch = RuntimeWatch::new(&dir.0, wake.clone()).unwrap();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            wake.wake();
+        });
+        assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_wake_pipe_alone_uses_the_fallback_timeout() {
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let mut watch = RuntimeWatch::without_watch(wake.clone());
+        assert_eq!(watch.timeout(), FALLBACK_POLL);
+        let timeout = watch.timeout();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            wake.wake();
+        });
+        assert_eq!(watch.wait(timeout), WaitOutcome::Event);
+        assert!(started.elapsed() < FALLBACK_POLL);
+    }
+
+    #[test]
+    fn an_unwatchable_path_reports_an_error() {
+        let dir = TempDir::new("watch-error");
+        let file = dir.0.join("plain-file");
+        std::fs::write(&file, "").unwrap();
+        let wake = Arc::new(WakePipe::new().unwrap());
+        assert!(RuntimeWatch::new(&file.join("runtime"), wake).is_err());
     }
 
     struct TempDir(std::path::PathBuf);
