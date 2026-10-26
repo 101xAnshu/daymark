@@ -287,6 +287,59 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
+    /// Re-opens a closed session in place. Used when focus returns to the same
+    /// application immediately after a short-lived interruption, so the
+    /// journal keeps one row instead of two adjacent ones. Fails while any
+    /// other row is open, which keeps the at-most-one-open invariant.
+    pub fn reopen_session(&self, id: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE sessions SET is_open = 1 WHERE id = ?1 AND is_open = 0",
+                [id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Folds a short focus session into the preceding application's row.
+    ///
+    /// The short row must still be open and the target must already be
+    /// closed. One transaction so a failure can never leave the short row
+    /// deleted while the target stays unextended.
+    pub fn merge_short_session(
+        &self,
+        short_id: i64,
+        target_id: i64,
+        end: i64,
+    ) -> Result<(), String> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| e.to_string())?;
+        let outcome = (|| -> Result<(), String> {
+            self.conn
+                .execute(
+                    "DELETE FROM sessions WHERE id = ?1 AND is_open = 1",
+                    params![short_id],
+                )
+                .map_err(|e| e.to_string())?;
+            self.conn
+                .execute(
+                    "UPDATE sessions SET ended_at = MAX(ended_at, ?2)\n\
+                     WHERE id = ?1 AND is_open = 0",
+                    params![target_id, end],
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => self.conn.execute_batch("COMMIT").map_err(|e| e.to_string()),
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     /// Sessions that contribute to a day. The currently open interval is
     /// excluded; the interface adds the live interval from the tracker.
     pub fn sessions_between(&self, start: i64, end: i64) -> Result<Vec<SessionRow>, String> {
@@ -585,6 +638,40 @@ mod tests {
         let removed = store.prune_before(today.add_days(-30).start_ts()).unwrap();
         assert_eq!(removed, 1);
         assert_eq!(store.session_count(), 1);
+    }
+
+    #[test]
+    fn a_short_session_merges_into_a_closed_one() {
+        let dir = TempDir::new("merge");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let id = store.upsert_app(&app("a"), 0).unwrap();
+        let target = store.open_session(id, 100).unwrap();
+        store.close_session(target, 160).unwrap();
+        let short = store.open_session(id, 160).unwrap();
+        store.merge_short_session(short, target, 164).unwrap();
+        assert_eq!(store.session_count(), 1);
+        let rows = store.sessions_between(0, 1000).unwrap();
+        assert_eq!(rows[0].started, 100);
+        assert_eq!(rows[0].ended, 164);
+    }
+
+    #[test]
+    fn a_session_can_be_reopened_once() {
+        let dir = TempDir::new("reopen");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let id = store.upsert_app(&app("a"), 0).unwrap();
+        let s = store.open_session(id, 100).unwrap();
+        store.close_session(s, 140).unwrap();
+        store.reopen_session(s).unwrap();
+        // The reopened row is open again: excluded from day rows, and the
+        // unique index still forbids a second open interval.
+        assert!(store.sessions_between(0, 1000).unwrap().is_empty());
+        assert!(store.open_session(id, 150).is_err());
+        store.close_session(s, 200).unwrap();
+        let rows = store.sessions_between(0, 1000).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].started, 100);
+        assert_eq!(rows[0].ended, 200);
     }
 
     #[test]
