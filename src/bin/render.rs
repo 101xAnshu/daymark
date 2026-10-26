@@ -9,10 +9,33 @@ use slint::platform::{Platform, PlatformError, WindowAdapter};
 use slint::{ComponentHandle, PhysicalSize};
 
 use daymark::app::AppController;
+use daymark::date::Day;
 use daymark::db::Store;
+use daymark::desktop::ResolvedApp;
 use daymark::settings::{Settings, ThemePref};
 use daymark::tracker::{TrackerHandle, TrackingStatus};
 use daymark::{AppWindow, Theme};
+
+/// One quiet audio-backed session on today's timeline, far enough from the
+/// demo blocks that the note is easy to inspect.
+fn seed_presence(store: &Store) {
+    let today = Day::today();
+    let app = ResolvedApp {
+        key: "vlc.desktop".into(),
+        name: "VLC media player".into(),
+        icon: Some("vlc".into()),
+        desktop_id: Some("vlc.desktop".into()),
+        wm_class: None,
+        matched: true,
+    };
+    if let Ok(app_id) = store.upsert_app(&app, today.start_ts()) {
+        if let Ok(id) =
+            store.open_session_with_presence(app_id, today.start_ts() + 22 * 3600, "audio")
+        {
+            let _ = store.close_session(id, today.start_ts() + 22 * 3600 + 12 * 60);
+        }
+    }
+}
 
 struct HeadlessPlatform {
     window: Rc<MinimalSoftwareWindow>,
@@ -69,6 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         && state != "rhythm-empty"
     {
         daymark::demo::seed(&store);
+        if state == "presence" {
+            seed_presence(&store);
+        }
     }
     let mut settings = Settings {
         autostart: true,

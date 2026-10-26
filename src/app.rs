@@ -17,7 +17,7 @@ use crate::instance::{COMMAND_NONE, COMMAND_QUIT, COMMAND_SHOW};
 use crate::logging;
 use crate::settings::{self, Settings, ThemePref};
 use crate::stats::{self, SessionRow};
-use crate::tracker::{self, LiveState, TrackerHandle, TrackingStatus};
+use crate::tracker::{self, LiveState, Presence, TrackerHandle, TrackingStatus};
 use crate::{
     AppRow, AppWindow, DayBar, HeatCell, HeatRow, HistoryRow, HourBar, MetricRow, Theme,
     TimelineSegment,
@@ -399,6 +399,7 @@ impl AppController {
                 .set_heatmap(ModelRc::new(VecModel::from(Vec::<HeatRow>::new())));
             self.ui.set_heatmap_total("".into());
             self.ui.set_has_heatmap(false);
+            self.ui.set_presence_note("".into());
             self.ui
                 .set_history(ModelRc::new(VecModel::from(Vec::<HistoryRow>::new())));
             self.last_refresh = Instant::now();
@@ -533,6 +534,22 @@ impl AppController {
             }
         }
         self.ui.set_metrics(ModelRc::new(VecModel::from(metrics)));
+
+        // Presence is a quiet note, not a metric: the row above is already
+        // full at the 900 px minimum width. The live interval is excluded from
+        // stored day rows, so add it separately when it has presence.
+        let mut presence_seconds = store
+            .presence_seconds_between(day.start_ts(), day.end_ts())
+            .unwrap_or(0);
+        if self.selected_offset == 0 {
+            if let Some(current) = &live.current {
+                if current.presence != Presence::Input {
+                    presence_seconds += current.elapsed.max(0);
+                }
+            }
+        }
+        self.ui
+            .set_presence_note(presence_note(presence_seconds).into());
 
         let timeline: Vec<TimelineSegment> = stats::timeline_segments(&rows, day)
             .into_iter()
@@ -1538,6 +1555,18 @@ fn today_offset(today: Day, day: Day) -> i32 {
     // Day boundaries are local, so round the difference to the nearest day.
     let diff = day.start_ts() - today.start_ts();
     (diff as f64 / 86_400.0).round() as i32
+}
+
+/// A quiet, non-judgemental note for the Day view. Empty when no recorded
+/// session had audio or an idle inhibitor, so the line costs no space.
+fn presence_note(seconds: i64) -> String {
+    if seconds <= 0 {
+        return String::new();
+    }
+    format!(
+        "{} with audio or a video playing",
+        date::format_duration(seconds)
+    )
 }
 
 /// One-line description of the pause state for the settings panel and the
