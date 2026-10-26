@@ -14,6 +14,7 @@ use slint::{ComponentHandle, Image, ModelRc, SharedPixelBuffer, VecModel};
 use crate::date::{self, Day};
 use crate::db::{self, AppInfo, Store};
 use crate::instance::{COMMAND_NONE, COMMAND_QUIT, COMMAND_SHOW};
+use crate::logging;
 use crate::settings::{self, Settings, ThemePref};
 use crate::stats::{self, SessionRow};
 use crate::tracker::{self, LiveState, TrackerHandle, TrackingStatus};
@@ -899,7 +900,9 @@ impl AppController {
                         .add_days(-(ctl.settings.retention_days as i32))
                         .start_ts();
                     if ctl.settings.retention_days > 0 {
-                        let _ = store.prune_before(cutoff);
+                        if let Err(e) = store.prune_before(cutoff) {
+                            logging::error("retention", &e);
+                        }
                     }
                 }
                 ctl.force_refresh = true;
@@ -937,6 +940,7 @@ impl AppController {
                         ctl.save_settings();
                     }
                     Err(e) => {
+                        logging::error("autostart", &e);
                         ctl.settings.autostart = crate::platform::autostart_installed();
                         ctl.settings_error = e;
                     }
@@ -975,6 +979,7 @@ impl AppController {
             controller.borrow().ui.on_open_data(move || {
                 let mut ctl = c.borrow_mut();
                 if let Err(e) = crate::platform::open_data_folder() {
+                    logging::error("open_data_folder", &e);
                     ctl.settings_error = e;
                     ctl.force_refresh = true;
                     ctl.refresh();
@@ -988,7 +993,9 @@ impl AppController {
                 if let Some(tracker) = &ctl.tracker {
                     tracker.request_reset();
                 } else if let Some(store) = &ctl.store {
-                    let _ = store.delete_all();
+                    if let Err(e) = store.delete_all() {
+                        logging::error("delete_all", &e);
+                    }
                 }
                 ctl.query.clear();
                 ctl.ui.set_search_text("".into());
@@ -1052,6 +1059,7 @@ impl AppController {
     fn save_settings(&mut self) {
         if let Some(store) = &self.store {
             if let Err(e) = self.settings.save(store) {
+                logging::error("save_settings", &e);
                 self.settings_error = format!("Could not save settings: {e}");
             } else {
                 self.settings_error.clear();
@@ -1074,17 +1082,20 @@ impl AppController {
                             self.tracker = Some(tracker::spawn(write_store, self.settings.clone()));
                         }
                         Err(e) => {
+                            logging::error("tracking_database", &e);
                             self.settings_error = e;
                         }
                     }
                 }
                 if let Err(e) = crate::platform::apply_autostart(self.settings.autostart) {
+                    logging::error("autostart", &e);
                     self.settings_error = e;
                 }
                 self.force_refresh = true;
                 self.refresh();
             }
             Err(e) => {
+                logging::error("database", &e);
                 self.load_error = e;
                 self.refresh();
             }
@@ -1215,7 +1226,7 @@ impl AppController {
         self.force_refresh = true;
         self.refresh();
         let job = self.setup_job.clone();
-        std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("daymark-setup".into())
             .spawn(move || {
                 let result = crate::platform::install_extension();
@@ -1223,7 +1234,14 @@ impl AppController {
                     *slot = Some(result);
                 }
             })
-            .ok();
+        {
+            logging::error("setup_thread", &error.to_string());
+            self.setup_busy = false;
+            self.ui.set_setup_busy(false);
+            self.settings_error = "Could not start the setup helper.".into();
+            self.force_refresh = true;
+            self.refresh();
+        }
     }
 
     fn finish_setup(&mut self, result: Result<crate::platform::Capabilities, String>) {
@@ -1242,6 +1260,7 @@ impl AppController {
                 let _ = crate::platform::apply_autostart(true);
             }
             Err(e) => {
+                logging::error("extension_install", &e);
                 self.settings_error = e;
             }
         }
