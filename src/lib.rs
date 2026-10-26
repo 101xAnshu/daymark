@@ -12,6 +12,7 @@ pub mod json;
 pub mod logging;
 pub mod platform;
 pub mod settings;
+pub mod sites;
 pub mod stats;
 pub mod tracker;
 pub mod update;
