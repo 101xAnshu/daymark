@@ -391,6 +391,13 @@ struct RuntimeWatch {
 impl RuntimeWatch {
     fn new(directory: &Path, wake: Arc<WakePipe>) -> io::Result<Self> {
         std::fs::create_dir_all(directory)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // The companion also creates this directory 0700. If the app gets
+            // there first, keep the state file private as well.
+            let _ = std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700));
+        }
         let inotify = Inotify::init()?;
         inotify.watches().add(directory, WATCH_MASK)?;
         Ok(Self {
@@ -1179,6 +1186,18 @@ mod tests {
         });
         assert_eq!(watch.wait(timeout), WaitOutcome::Event);
         assert!(started.elapsed() < FALLBACK_POLL);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_watch_keeps_the_runtime_directory_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("watch-perms");
+        let runtime = dir.0.join("runtime");
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let _watch = RuntimeWatch::new(&runtime, wake).unwrap();
+        let mode = std::fs::metadata(&runtime).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[test]
