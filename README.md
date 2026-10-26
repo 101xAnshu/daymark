@@ -374,7 +374,7 @@ created.
 
 ## Verification
 
-- `cargo test --lib`: **120 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **125 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
   across midnight, idle-gap exclusion, per-app totals, day metrics and timeline
   segmentation (empty days, gaps, overlaps, after-midnight and cross-midnight
@@ -396,8 +396,9 @@ created.
   deletion, wake-pipe interruption, a private runtime directory, an unwatchable
   path, the audio/inhibitor presence cap (recent input, the two-hour cap, the
   latch, and lock/idle precedence), session presence persistence and the schema
-  v4 migration, and the weekly digest computation, notification payload and
-  preference round-trip.
+  v4 migration, the weekly digest computation, notification payload and
+  preference round-trip, digest delivery and once-a-day gating, and local APT
+  policy/status parsing with numeric version comparison.
 - The watch path was exercised with a real inotify watcher against temporary
   runtime directories. The live handoff from a GNOME companion focus change to
   the next tracker tick still needs a session with the companion loaded.

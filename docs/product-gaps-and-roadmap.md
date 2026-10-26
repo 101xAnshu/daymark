@@ -28,7 +28,7 @@ The product should be reliable, private, native, and easy to install and keep ru
 ## V2 progress
 
 - The Rhythm view is implemented on `v2`: a 7×24 heatmap for the last seven days,
-  with hour labels, per-day totals, and a legend. The library has **120 tests**.
+  with hour labels, per-day totals, and a legend. The library has **125 tests**.
 - The Day view now has a metrics row and a 24-hour timeline on `v2`. The metrics row
   reports the longest uninterrupted stretch, distinct apps, time after midnight
   (00:00–05:00), the change from the same weekday last week, and a live Now cell for
@@ -52,6 +52,12 @@ The product should be reliable, private, native, and easy to install and keep ru
   hours; the cap latches until input returns. Schema v4 adds `sessions.presence`
   (`input`, `inhibitor`, `audio` or `mixed`) without changing rollups or app identity, and
   the Day view shows a quiet presence note under the timeline.
+- The weekly digest is implemented on `v2`: computation, local notification payload,
+  preference persistence, once-a-day delivery through the tracker, and the companion
+  notification consumer. The Settings toggle is still pending.
+- The APT-aware update reader is implemented on `v2`: local dpkg status and
+  `apt-cache policy` parsing with numeric version comparison, no network. The UI notice is
+  pending, and there is no APT repository to report against yet.
 - V2 is local only. Nothing on `v2` is pushed until the branch is approved.
 
 ## 1. Executive summary
@@ -221,14 +227,15 @@ sessions into another day. A domain rollup would follow only if domains are adde
 
 ### Tests and measurement
 
-The tree now has 120 tests covering date handling, storage, recovery, migration, pruning,
+The tree now has 125 tests covering date handling, storage, recovery, migration, pruning,
 daily rollup preservation and raw/rollup merging (raw intervals win, totals-only days,
 old empty days), settings, single instance, tracker behavior, the inotify watch
 and fallback, the noise floor and merge, timed pause, log rotation, extension selection,
 the first-run decision, autostart consent, seven-day hourly heatmap aggregation, day
 metrics and timeline segmentation across midnight and idle gaps, idle_ms parsing, the
 two-hour presence boundary, input return, lock and idle precedence, presence persistence
-and the v3 to v4 migration, and read-only doctor/status output. Some tracker tests still
+and the v3 to v4 migration, weekly digest delivery and once-a-day gating, local APT
+policy/status parsing, and read-only doctor/status output. Some tracker tests still
 use real sleeps and wall time.
 
 The remaining target is a `tick` function that takes `now_wall`, `now_mono`, and state, with
@@ -308,8 +315,9 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 13. Add a tray with open, pause 15 minutes, pause 1 hour, pause until resumed, and quit.
     The tray icon should show the paused state, and it should reappear when the bar restarts.
 14. Add the 7 by 24 heatmap. **Implemented on `v2` as the Rhythm view.**
-15. Add the weekly digest notification.
-16. Add the APT-aware update notice.
+15. Add the weekly digest notification. **Implemented on `v2` except the Settings toggle.**
+16. Add the APT-aware update notice. **Local reader implemented on `v2`; the UI notice and
+    an APT repository remain.**
 17. Write the design token and decision notes, and review animation and transitions.
 18. Add an optional systemd user unit with `Restart=on-failure`. **Implemented on `v2`.**
 19. Build arm64 .deb and .rpm packages. **Implemented on `v2` as cross-built packages from
@@ -398,7 +406,7 @@ These choices are fixed for V1.
   inhibitors, and session-bus MPRIS playback.
 - `ui/app.slint` holds the day metrics row, 24-hour timeline, presence note, week, hourly,
   history, search, settings, first-run, and banner views.
-- The current tree has 120 tests, CI, amd64 and arm64 `.deb` packaging, x86_64 and aarch64
+- The current tree has 125 tests, CI, amd64 and arm64 `.deb` packaging, x86_64 and aarch64
   `.rpm` packaging, `doctor`, timed pause, the first-run flow, the noise floor, the Rhythm
   heatmap, the inotify watch, the day metrics and timeline, the audio/inhibitor presence
   cap, the weekly digest computation and transport, and the retention rollup in the Day
