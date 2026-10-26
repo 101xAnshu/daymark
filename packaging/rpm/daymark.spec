@@ -13,6 +13,7 @@ BuildArch:      x86_64
 Requires:       glibc >= 2.35
 Requires:       libgcc
 Recommends:     gnome-shell >= 48
+Recommends:     gnome-shell-extension-appindicator
 
 %description
 Daymark records how long each application is used and presents a calm daily

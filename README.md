@@ -121,6 +121,12 @@ The packages start no service and change no user settings at install time.
 Remove one with `sudo apt remove daymark` or `sudo dnf remove daymark`;
 recorded history is kept in your home directory.
 
+The tray icon uses the desktop's StatusNotifierItem/AppIndicator host. Ubuntu
+ships that host by default. Fedora may need the
+`gnome-shell-extension-appindicator` package; the packages recommend it but do
+not require it. Without a host, Daymark runs normally and simply has no tray
+icon.
+
 The package scripts default to the host architecture. Pass `--arch arm64` to
 `scripts/build-deb.sh` or `--arch aarch64` to `scripts/build-rpm.sh` for the
 cross build; it needs cargo-zigbuild and Zig.
@@ -227,6 +233,11 @@ graphical session.
   smaller headless mode.
 - Search filters the application list by name. Clicking anywhere outside the
   field releases focus.
+- The tray icon appears while Daymark has an interface. Its menu opens the
+  window, starts a 15 minute pause, a one hour pause or a pause until resumed,
+  resumes tracking, and quits the app. The icon and tooltip show the paused
+  state. An absent StatusNotifierItem/AppIndicator host only removes the icon;
+  the rest of the app keeps working.
 - Settings holds the idle timeout, retention, appearance, autostart, the weekly
   digest toggle, pause options (15 minutes, 1 hour, or until resumed), a local
   package-update notice, the data folder shortcut, and delete/quit actions. A
@@ -367,12 +378,13 @@ desktop session's Wayland/X11 libraries. The same build runs on Xorg; the old
 `--x11` installer flag is still accepted for compatibility.
 
 `--background` is genuinely invisible: no window, no Slint platform and no event
-loop exist until the interface is requested. The UI is created lazily when you
-open Daymark from the application grid. The tracker still watches the companion
-file and writes a heartbeat every 30 seconds, so the headless process wakes on
-changes rather than polling twice a second. It keeps a 30-second timeout for a
-missed event, and falls back to the two-second poll if the watch cannot be
-created.
+loop exist until the interface is requested. The tray is not created either;
+it starts with the first interface and stays for as long as the process keeps
+that interface alive. The UI is created lazily when you open Daymark from the
+application grid. The tracker still watches the companion file and writes a
+heartbeat every 30 seconds, so the headless process wakes on changes rather
+than polling twice a second. It keeps a 30-second timeout for a missed event,
+and falls back to the two-second poll if the watch cannot be created.
 
 ## Verification
 
@@ -510,6 +522,7 @@ src/date.rs           local dates, DST-safe boundaries, formatting
 src/json.rs           tiny JSON reader for the companion state
 src/platform.rs       autostart, extension install, theme detection
 src/instance.rs       flock + Unix socket IPC
+src/tray.rs           optional StatusNotifierItem tray and its icon
 ui/                   Slint dashboard and design tokens
 extension/            GNOME Shell companion (GJS)
 media/                Remotion project for the tour above

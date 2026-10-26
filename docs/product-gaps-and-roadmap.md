@@ -59,6 +59,14 @@ The product should be reliable, private, native, and easy to install and keep ru
   `apt-cache policy` parsing with numeric version comparison, no network, and a quiet
   Settings notice when a newer candidate exists. There is no APT repository to report
   against yet.
+- The tray is implemented on `v2`: a small StatusNotifierItem menu offers Open
+  Daymark, Pause 15 minutes, Pause 1 hour, Pause until resumed, Resume while
+  paused, and Quit Daymark. It drives the existing local socket command path,
+  keeps the UI thread free of D-Bus work, shows the paused state with a
+  generated icon, and stays absent when no AppIndicator host exists. Ubuntu
+  ships the host; Fedora may need `gnome-shell-extension-appindicator`, which
+  the packages recommend but do not require. The tray starts only when the UI
+  does, so `--background` remains a headless process.
 - V2 is local only. Nothing on `v2` is pushed until the branch is approved.
 
 ## 1. Executive summary
@@ -315,6 +323,9 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 
 13. Add a tray with open, pause 15 minutes, pause 1 hour, pause until resumed, and quit.
     The tray icon should show the paused state, and it should reappear when the bar restarts.
+    **Implemented on `v2` with a StatusNotifierItem menu over the local socket. The icon
+    shows the paused state; a watcher that returns after a panel restart is picked up
+    again; a missing host or session bus leaves the app usable.**
 14. Add the 7 by 24 heatmap. **Implemented on `v2` as the Rhythm view.**
 15. Add the weekly digest notification. **Implemented on `v2`.**
 16. Add the APT-aware update notice. **Local reader and Settings notice implemented on
@@ -380,7 +391,9 @@ These choices are fixed for V1.
    the glibc 2.35 floor. The .rpm targets Fedora 42 and newer on x86_64 (GNOME 48+).
 4. V1 ships through GitHub Releases only. The APT repository comes later.
 5. V1 stays title-free. Site names are not in V1.
-6. The tray ships in V2.
+6. The tray ships in V2. It uses the StatusNotifierItem/AppIndicator host, recommends
+   `gnome-shell-extension-appindicator` on Ubuntu and Fedora without requiring it, and
+   fails quietly when no host is present.
 7. Pause offers 15 minutes, 1 hour, and until resumed. A timed pause ends by itself; an
    open-ended pause resumes at the next app start, which is the next login when autostart
    is on.
@@ -402,7 +415,10 @@ These choices are fixed for V1.
   the `--background` loop.
 - `src/platform.rs` handles autostart and extension install, preferring the packaged
   system-wide copy.
-- `src/instance.rs` holds the show and quit socket.
+- `src/instance.rs` holds the show, quit, pause and resume socket commands.
+- `src/tray.rs` holds the optional StatusNotifierItem menu, generated icons and the
+  low-frequency pause-state poll. It sends commands through `src/instance.rs` and never
+  touches Slint.
 - `extension/extension.js` reports focus, idle, shield, sleep, idle milliseconds, idle
   inhibitors, and session-bus MPRIS playback.
 - `ui/app.slint` holds the day metrics row, 24-hour timeline, presence note, week, hourly,
@@ -410,7 +426,8 @@ These choices are fixed for V1.
 - The current tree has 125 tests, CI, amd64 and arm64 `.deb` packaging, x86_64 and aarch64
   `.rpm` packaging, `doctor`, timed pause, the first-run flow, the noise floor, the Rhythm
   heatmap, the inotify watch, the day metrics and timeline, the audio/inhibitor presence
-  cap, the weekly digest computation and transport, and the retention rollup in the Day
-  and History views. It still has no tray.
+  cap, the weekly digest computation and transport, the retention rollup in the Day and
+  History views, and the optional tray. The tray's live appearance still needs a GNOME or
+  other AppIndicator session.
 - This document is the plan and the review record. V1 is merged on `main`; V2 runs on
   `v2`.
