@@ -71,6 +71,10 @@ jobs:
               exit
             }
           ' Cargo.toml)"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}." >&2
+            exit 1
+          fi
           echo "version=${version}" >>"$GITHUB_OUTPUT"
 
       - name: Publish draft release
