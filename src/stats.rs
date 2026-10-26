@@ -138,10 +138,22 @@ pub fn distinct_apps(rows: &[SessionRow], day: Day) -> usize {
 /// portion, and the 05:00 boundary is excluded.
 pub fn after_midnight_seconds(rows: &[SessionRow], day: Day) -> i64 {
     let day_start = day.start_ts();
-    let window_end = (day_start + AFTER_MIDNIGHT_HOURS * 3600).min(day.end_ts());
+    let window_end = early_morning_end(day);
     rows.iter()
         .map(|r| overlap(r.started, r.ended, day_start, window_end))
         .sum()
+}
+
+/// Timestamp of local 05:00 on `day`. Found by stepping through the early
+/// hours so a DST transition cannot turn the five-hour label into four or six
+/// elapsed hours.
+fn early_morning_end(day: Day) -> i64 {
+    let day_end = day.end_ts();
+    let mut cutoff = day.start_ts();
+    while cutoff < day_end && date::local_hour(cutoff) < AFTER_MIDNIGHT_HOURS as u32 {
+        cutoff += 60;
+    }
+    cutoff.min(day_end)
 }
 
 /// Difference between `day` and the same weekday one week earlier. `None` when
@@ -472,6 +484,8 @@ mod tests {
     fn after_midnight_counts_only_the_early_hours() {
         let day = Day::today();
         let yesterday = day.add_days(-1);
+        let cutoff = early_morning_end(day);
+        assert_eq!(date::local_hour(cutoff), 5);
         let rows = [
             // Straddles midnight: 90 minutes land after 00:00.
             SessionRow {
@@ -479,11 +493,11 @@ mod tests {
                 started: at(yesterday, 23, 0),
                 ended: at(day, 1, 30),
             },
-            // Only 04:30 to 05:00 counts; the 05:00 boundary is excluded.
+            // Only the half hour before local 05:00 counts.
             SessionRow {
                 app_id: 2,
-                started: at(day, 4, 30),
-                ended: at(day, 6, 0),
+                started: cutoff - 30 * 60,
+                ended: cutoff + 3600,
             },
             SessionRow {
                 app_id: 3,
