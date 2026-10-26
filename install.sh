@@ -78,11 +78,11 @@ case "${1:-}" in
 esac
 
 BUILD=1
-FEATURES=""
+FEATURES=()
 for arg in "$@"; do
     case "${arg}" in
         --no-build) BUILD=0 ;;
-        --x11) FEATURES="--features x11" ;;
+        --x11) FEATURES=(--features x11) ;;
         *) echo "Unknown option: ${arg}" >&2; usage; exit 2 ;;
     esac
 done
@@ -96,7 +96,7 @@ if [ "${BUILD}" = 1 ]; then
         echo "pkg-config is required. Install it with: sudo apt install pkg-config" >&2
         exit 1
     }
-    (cd "${ROOT}" && cargo build --release ${FEATURES})
+    (cd "${ROOT}" && cargo build --release "${FEATURES[@]}")
 fi
 
 [ -x "${ROOT}/target/release/daymark" ] || {
