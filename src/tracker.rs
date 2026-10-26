@@ -3,10 +3,14 @@
 //! non-overlapping intervals.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+
+use inotify::{Inotify, WatchMask};
 
 use crate::date::{self, Day};
 use crate::db::Store;
@@ -257,6 +261,180 @@ const NOISE_FLOOR_SECS: i64 = 5;
 /// Small slack for comparing the stored end of the previous session with the
 /// start of the next one: integer-second accounting can differ by one.
 const CONTIGUOUS_SLACK: i64 = 1;
+
+/// The companion writes on every focus, idle and lock change and sends a
+/// heartbeat every 15 seconds. An inotify wake handles those at once; this is
+/// only the safety net for a missed event.
+const WATCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The pre-watch pace, kept for the fallback when no watch can be installed.
+const FALLBACK_POLL: Duration = Duration::from_secs(2);
+
+/// Close-write covers an in-place write; moved-to, create, delete and attrib
+/// cover an atomic replacement, a deletion and a permission change.
+const WATCH_MASK: WatchMask = WatchMask::CLOSE_WRITE
+    .union(WatchMask::MOVED_TO)
+    .union(WatchMask::CREATE)
+    .union(WatchMask::DELETE)
+    .union(WatchMask::ATTRIB);
+
+/// One tick may credit at most one full watch interval. A larger monotonic
+/// jump is still treated as a gap, so a missed suspend signal cannot turn
+/// sleep into usage.
+const MAX_CREDIT_SECS: i64 = WATCH_TIMEOUT.as_secs() as i64;
+const TICK_GAP_SECS: i64 = MAX_CREDIT_SECS + 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaitOutcome {
+    Event,
+    Timeout,
+}
+
+/// The pure part of the wait decision: a positive poll result is an event,
+/// zero is a timeout, and an error is also retried after the fallback wait.
+fn wait_outcome(ready: libc::c_int) -> WaitOutcome {
+    if ready > 0 {
+        WaitOutcome::Event
+    } else {
+        WaitOutcome::Timeout
+    }
+}
+
+/// How long to block without a filesystem event: the watch safety net when
+/// watching, the legacy poll when falling back.
+fn wait_timeout(watching: bool) -> Duration {
+    if watching {
+        WATCH_TIMEOUT
+    } else {
+        FALLBACK_POLL
+    }
+}
+
+/// A self-pipe so IPC wakeups interrupt `poll` the same way `unpark` used to
+/// interrupt `park_timeout`.
+struct WakePipe {
+    read: OwnedFd,
+    write: OwnedFd,
+}
+
+impl WakePipe {
+    fn new() -> io::Result<Self> {
+        let mut fds = [0; 2];
+        let result = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        if result == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // The two descriptors are fresh and owned by this object.
+        let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        Ok(Self { read, write })
+    }
+
+    fn wake(&self) {
+        let byte = 1u8;
+        let _ = unsafe {
+            libc::write(
+                self.write.as_raw_fd(),
+                (&byte as *const u8).cast(),
+                std::mem::size_of_val(&byte),
+            )
+        };
+    }
+
+    fn drain(&self) {
+        let mut buffer = [0u8; 64];
+        loop {
+            let read = unsafe {
+                libc::read(
+                    self.read.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
+            };
+            if read <= 0 {
+                break;
+            }
+        }
+    }
+}
+
+/// The runtime-directory watch plus the wake pipe. Without a watch it still
+/// waits on the pipe with the fallback timeout, so IPC stays immediate.
+struct RuntimeWatch {
+    inotify: Option<Inotify>,
+    wake: Arc<WakePipe>,
+}
+
+impl RuntimeWatch {
+    fn new(directory: &Path, wake: Arc<WakePipe>) -> io::Result<Self> {
+        std::fs::create_dir_all(directory)?;
+        let inotify = Inotify::init()?;
+        inotify.watches().add(directory, WATCH_MASK)?;
+        Ok(Self {
+            inotify: Some(inotify),
+            wake,
+        })
+    }
+
+    fn without_watch(wake: Arc<WakePipe>) -> Self {
+        Self {
+            inotify: None,
+            wake,
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        wait_timeout(self.inotify.is_some())
+    }
+
+    fn wait(&mut self, timeout: Duration) -> WaitOutcome {
+        let mut fds = [
+            libc::pollfd {
+                fd: self
+                    .inotify
+                    .as_ref()
+                    .map(AsRawFd::as_raw_fd)
+                    .unwrap_or(-1),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.wake.read.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let millis = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+        let ready = loop {
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
+            if ready < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            break ready;
+        };
+        if fds[1].revents & libc::POLLIN != 0 {
+            self.wake.drain();
+        }
+        if fds[0].revents & libc::POLLIN != 0 {
+            self.drain_events();
+        }
+        wait_outcome(ready)
+    }
+
+    fn drain_events(&mut self) {
+        let Some(inotify) = self.inotify.as_mut() else {
+            return;
+        };
+        let mut buffer = [0u8; 4096];
+        loop {
+            match inotify.read_events(&mut buffer) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
+    }
+}
 
 /// The most recently closed session that may still be extended: a following
 /// short focus merges into it, and an immediate return to the same app

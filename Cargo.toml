@@ -24,6 +24,7 @@ slint = { version = "=1.8.0", default-features = false, features = [
 rusqlite = { version = "0.37", default-features = false, features = ["bundled"] }
 libc = "0.2"
 png = "0.18"
+inotify = { version = "0.11", default-features = false }
 
 [build-dependencies]
 slint-build = "=1.8.0"
