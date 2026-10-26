@@ -113,7 +113,7 @@ Maintainer: ${MAINTAINER}
 Section: utils
 Priority: optional
 Depends: libc6 (>= 2.35), libgcc-s1
-Recommends: gnome-shell (>= 45)
+Recommends: gnome-shell (>= 46)
 Description: quiet local screen time journal for GNOME
  Daymark records how long each application is used and presents a calm
  daily view, the shape of the week, and fourteen days of history.
@@ -122,6 +122,8 @@ Description: quiet local screen time journal for GNOME
  A tiny GNOME Shell companion extension reports focus, idle and lock
  state. Daymark opens no web view, makes no network requests, and needs
  no account.
+ .
+ GNOME Shell 46 or newer is required; on Ubuntu that means 24.04 or newer.
  .
  This package installs the application, desktop entry, icon and the
  companion extension.

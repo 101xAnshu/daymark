@@ -12,7 +12,7 @@ BuildArch:      x86_64
 
 Requires:       glibc >= 2.35
 Requires:       libgcc
-Recommends:     gnome-shell >= 45
+Recommends:     gnome-shell >= 48
 
 %description
 Daymark records how long each application is used and presents a calm daily
@@ -21,6 +21,8 @@ stored in a small SQLite file on the local machine.
 
 A tiny GNOME Shell companion extension reports focus, idle and lock state.
 Daymark opens no web view, makes no network requests, and needs no account.
+
+GNOME Shell 48 or newer is required; on Fedora that means 42 or newer.
 
 This package installs the application, desktop entry, icon and the companion
 extension.
