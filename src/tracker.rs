@@ -413,11 +413,7 @@ impl RuntimeWatch {
     fn wait(&mut self, timeout: Duration) -> WaitOutcome {
         let mut fds = [
             libc::pollfd {
-                fd: self
-                    .inotify
-                    .as_ref()
-                    .map(AsRawFd::as_raw_fd)
-                    .unwrap_or(-1),
+                fd: self.inotify.as_ref().map(AsRawFd::as_raw_fd).unwrap_or(-1),
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -1139,10 +1135,7 @@ mod tests {
         );
         assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
         // With no further change the watch falls through to its timeout.
-        assert_eq!(
-            watch.wait(Duration::from_millis(150)),
-            WaitOutcome::Timeout
-        );
+        assert_eq!(watch.wait(Duration::from_millis(150)), WaitOutcome::Timeout);
     }
 
     #[test]
