@@ -110,8 +110,7 @@ impl TrackerHandle {
             .settings
             .lock()
             .map(|current| {
-                current.paused != settings.paused
-                    || current.paused_until != settings.paused_until
+                current.paused != settings.paused || current.paused_until != settings.paused_until
             })
             .unwrap_or(false);
         if let Ok(mut current) = self.settings.lock() {
@@ -908,5 +907,52 @@ mod tests {
         std::thread::sleep(Duration::from_millis(30));
         tracker.tick();
         assert!(tracker.current.is_some());
+    }
+
+    #[test]
+    fn a_timed_pause_records_nothing_and_resumes_at_its_deadline() {
+        let dir = TempDir::new("timed-pause");
+        let mut tracker = make_tracker(&dir);
+        let deadline = date::unix_now() + 3600;
+        {
+            let mut settings = tracker.handle.settings.lock().unwrap();
+            settings.paused = true;
+            settings.paused_until = deadline;
+        }
+        write_state(
+            &dir.state_path(),
+            1,
+            Some(("org.example.Alpha", "Alpha")),
+            false,
+            0,
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        tracker.tick();
+        // While the pause runs, a focused app records nothing.
+        assert!(tracker.current.is_none());
+        assert_eq!(tracker.last_status, TrackingStatus::Paused);
+        assert!(rows(&tracker).is_empty());
+
+        // After the deadline the tracker resumes on its own, clears the
+        // persisted pause, and only then starts counting again.
+        let expiry = date::unix_now() - 1;
+        tracker.handle.settings.lock().unwrap().paused_until = expiry;
+        std::thread::sleep(Duration::from_millis(30));
+        tracker.tick();
+        assert_eq!(tracker.last_status, TrackingStatus::Active);
+        assert!(tracker.current.is_some());
+        let resumed = tracker.handle.settings();
+        assert!(!resumed.paused);
+        assert_eq!(resumed.paused_until, 0);
+        assert_eq!(tracker.store.get_setting("paused").as_deref(), Some("0"));
+        assert_eq!(
+            tracker.store.get_setting("paused_until").as_deref(),
+            Some("0")
+        );
+        let started = tracker.current.as_ref().unwrap().started;
+        assert!(
+            started >= expiry && tracker.current.as_ref().unwrap().accumulated == 0,
+            "no paused time may be recorded"
+        );
     }
 }

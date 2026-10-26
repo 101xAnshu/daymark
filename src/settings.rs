@@ -125,9 +125,7 @@ impl Settings {
         store
             .set_setting("idle_seconds", &self.idle_seconds.to_string())
             .and_then(|_| store.set_setting("paused", if self.paused { "1" } else { "0" }))
-            .and_then(|_| {
-                store.set_setting("paused_until", &self.paused_until.to_string())
-            })
+            .and_then(|_| store.set_setting("paused_until", &self.paused_until.to_string()))
             .and_then(|_| store.set_setting("autostart", if self.autostart { "1" } else { "0" }))
             .and_then(|_| store.set_setting("retention_days", &self.retention_days.to_string()))
             .and_then(|_| store.set_setting("theme", self.theme.as_str()))
@@ -146,5 +144,101 @@ pub fn write_extension_config(runtime_dir: &std::path::Path, idle_seconds: i64) 
     let tmp = runtime_dir.join("config.json.tmp");
     if std::fs::write(&tmp, body).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct TempDb(PathBuf);
+    impl TempDb {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "daymark-settings-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn db(&self) -> PathBuf {
+            self.0.join("daymark.db")
+        }
+    }
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Simulate a restart: open the database, set raw pause keys, then load.
+    fn load_after(raw_paused: &str, raw_until: Option<i64>) -> (Settings, Store) {
+        let dir = TempDb::new("pause");
+        let store = Store::open_at(&dir.db()).unwrap();
+        store.set_setting("paused", raw_paused).unwrap();
+        if let Some(until) = raw_until {
+            store
+                .set_setting("paused_until", &until.to_string())
+                .unwrap();
+        }
+        (Settings::load(&store), store)
+    }
+
+    #[test]
+    fn an_indefinite_pause_resumes_at_the_next_start() {
+        // Covers the new "until resumed" pause and the old paused=1 format:
+        // neither carries a deadline, so neither survives a restart.
+        let (settings, store) = load_after("1", None);
+        assert!(!settings.paused);
+        assert_eq!(settings.paused_until, 0);
+        assert_eq!(store.get_setting("paused").as_deref(), Some("0"));
+        assert_eq!(store.get_setting("paused_until").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn an_active_timed_pause_survives_a_restart() {
+        let until = crate::date::unix_now() + 900;
+        let (settings, store) = load_after("1", Some(until));
+        assert!(settings.paused);
+        assert_eq!(settings.paused_until, until);
+        // Untouched: still armed for the same deadline.
+        assert_eq!(
+            store.get_setting("paused_until").as_deref(),
+            Some(until.to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn an_expired_timed_pause_resumes_at_the_next_start() {
+        let until = crate::date::unix_now() - 900;
+        let (settings, store) = load_after("1", Some(until));
+        assert!(!settings.paused);
+        assert_eq!(settings.paused_until, 0);
+        assert_eq!(store.get_setting("paused").as_deref(), Some("0"));
+        assert_eq!(store.get_setting("paused_until").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn an_unpaused_store_stays_unpaused() {
+        let (settings, _store) = load_after("0", None);
+        assert!(!settings.paused);
+        assert_eq!(settings.paused_until, 0);
+    }
+
+    #[test]
+    fn pause_expiry_matches_the_deadline() {
+        let mut settings = Settings::default();
+        assert!(!settings.pause_expired(0), "not paused");
+        settings.paused = true;
+        assert!(!settings.pause_expired(60), "no deadline is never expired");
+        settings.paused_until = 120;
+        assert!(!settings.pause_expired(119));
+        assert!(settings.pause_expired(120));
+        assert!(settings.pause_expired(121));
     }
 }
