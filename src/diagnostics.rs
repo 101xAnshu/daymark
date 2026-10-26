@@ -17,7 +17,10 @@ const STATE_FRESH_SECS: u64 = 45;
 struct Paths {
     db: PathBuf,
     state: PathBuf,
+    /// The user-level companion written by source and archive installs.
     extension_dir: PathBuf,
+    /// The read-only companion shipped by a package. It wins when present.
+    system_extension_dir: PathBuf,
     autostart: PathBuf,
     logs: PathBuf,
 }
@@ -28,6 +31,7 @@ impl Paths {
             db: db::db_path(),
             state: platform::state_path(),
             extension_dir: platform::extension_dir(),
+            system_extension_dir: platform::system_extension_dir(),
             autostart: db::autostart_path(),
             logs: logging::log_dir(),
         }
@@ -234,6 +238,21 @@ fn state_snapshot(path: &Path, now: i64) -> (Option<u64>, Option<ExtensionState>
     (age, parsed)
 }
 
+/// The directory of the companion GNOME will actually load, using the same
+/// preference as `platform::extension_installed()`: the packaged system-wide
+/// copy wins, then the user-level copy, and neither means "not installed".
+fn selected_extension_dir(system_dir: &Path, user_dir: &Path) -> Option<PathBuf> {
+    let source = platform::select_extension_source(
+        system_dir.join("metadata.json").is_file(),
+        user_dir.join("metadata.json").is_file(),
+    );
+    match source {
+        platform::ExtensionSource::System => Some(system_dir.to_path_buf()),
+        platform::ExtensionSource::User => Some(user_dir.to_path_buf()),
+        platform::ExtensionSource::None => None,
+    }
+}
+
 fn extension_version(dir: &Path) -> Option<String> {
     let text = fs::read_to_string(dir.join("metadata.json")).ok()?;
     let value = json::parse(&text)?;
@@ -256,6 +275,7 @@ fn collect(paths: &Paths, now: i64, extension_enabled: bool) -> DoctorReport {
         .as_ref()
         .and_then(|state| state.heartbeat_age)
         .or(file_age);
+    let extension_dir = selected_extension_dir(&paths.system_extension_dir, &paths.extension_dir);
 
     let mut report = DoctorReport {
         db_path: paths.db.clone(),
@@ -268,9 +288,9 @@ fn collect(paths: &Paths, now: i64, extension_enabled: bool) -> DoctorReport {
         state_fresh,
         open_session: None,
         rows_today: 0,
-        extension_installed: paths.extension_dir.join("metadata.json").is_file(),
+        extension_installed: extension_dir.is_some(),
         extension_enabled,
-        extension_version: extension_version(&paths.extension_dir),
+        extension_version: extension_dir.as_deref().and_then(extension_version),
         autostart_installed: paths.autostart.is_file(),
         retention_days: settings::Settings::default().retention_days,
         last_error: logging::last_error(&paths.logs),
@@ -513,6 +533,7 @@ mod tests {
                 db: self.0.join("daymark.db"),
                 state: self.0.join("state.json"),
                 extension_dir: self.0.join("extension"),
+                system_extension_dir: self.0.join("system-extension"),
                 autostart: self.0.join("autostart/daymark.desktop"),
                 logs: self.0.join("logs"),
             }
@@ -623,6 +644,47 @@ mod tests {
             output
                 .contains("\nlast error: 2026-10-26 14:00:00 event=save message=Could not save\n")
         );
+    }
+
+    #[test]
+    fn doctor_prefers_the_packaged_system_extension() {
+        let dir = TempDir::new("doctor-system-extension");
+        let paths = dir.paths();
+        fs::create_dir_all(&paths.system_extension_dir).unwrap();
+        fs::write(
+            paths.system_extension_dir.join("metadata.json"),
+            r#"{"uuid":"daymark@daymark.app","version":3}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(&paths.extension_dir).unwrap();
+        fs::write(
+            paths.extension_dir.join("metadata.json"),
+            r#"{"uuid":"daymark@daymark.app","version":2}"#,
+        )
+        .unwrap();
+
+        let report = collect(&paths, date::unix_now(), true);
+        assert!(report.extension_installed);
+        assert_eq!(report.extension_version.as_deref(), Some("3"));
+        let output = render(&report);
+        assert!(output.contains("\nextension installed: yes\n"));
+        assert!(output.contains("\nextension version: 3\n"));
+    }
+
+    #[test]
+    fn doctor_finds_a_system_extension_without_a_user_copy() {
+        let dir = TempDir::new("doctor-system-only");
+        let paths = dir.paths();
+        fs::create_dir_all(&paths.system_extension_dir).unwrap();
+        fs::write(
+            paths.system_extension_dir.join("metadata.json"),
+            r#"{"uuid":"daymark@daymark.app","version":"4"}"#,
+        )
+        .unwrap();
+
+        let report = collect(&paths, date::unix_now(), true);
+        assert!(report.extension_installed);
+        assert_eq!(report.extension_version.as_deref(), Some("4"));
     }
 
     #[test]
