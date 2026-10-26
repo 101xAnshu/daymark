@@ -28,7 +28,12 @@ The product should be reliable, private, native, and easy to install and keep ru
 ## V2 progress
 
 - The Rhythm view is implemented on `v2`: a 7×24 heatmap for the last seven days,
-  with hour labels, per-day totals, and a legend. The library has **71 tests**.
+  with hour labels, per-day totals, and a legend.
+- The Day view now has a metrics row and a 24-hour timeline on `v2`. The metrics row
+  reports the longest uninterrupted stretch, distinct apps, time after midnight
+  (00:00–05:00), the change from the same weekday last week, and a live Now cell for
+  today. The timeline draws app-tinted sessions clipped to the selected day. The
+  library has **79 tests**.
 - The optional systemd user unit is implemented on `v2`: packages install it, but do not
   enable it. The decision log is in `docs/v2-decisions.md`.
 - V2 is local only. Nothing on `v2` is pushed until the branch is approved.
@@ -171,11 +176,11 @@ ignore fields, and a share percentage in the app list.
 
 ### Data depth
 
-Today, Daymark has a calm day view, 7 day bars, a by-hour chart, an app list, and 14 day
-history.
+Today, Daymark has a calm day view with a metrics row, a 24-hour session timeline,
+7 day bars, a by-hour chart, an app list, a 14 day history, and a 7×24 rhythm view.
 
-The target is a metrics row and a day timeline first, then a heatmap. Keep the calm visual
-language. Do not turn the timeline into hundreds of tiny segments.
+The heatmap shipped first; the metrics row and day timeline follow it. Keep the calm
+visual language. Do not turn the timeline into hundreds of tiny segments.
 
 ### Retention and time
 
@@ -186,11 +191,11 @@ only before this date" state. Add `tz_offset_min` to sessions and use it in day 
 
 ### Tests and measurement
 
-The tree now has 71 tests covering date handling, storage, recovery, migration, pruning,
+The tree now has 79 tests covering date handling, storage, recovery, migration, pruning,
 settings, single instance, tracker behavior, the noise floor and merge, timed pause, log
 rotation, extension selection, the first-run decision, autostart consent, seven-day hourly
-heatmap aggregation, and read-only doctor/status output. Some tracker tests still use real
-sleeps and wall time.
+heatmap aggregation, day metrics and timeline segmentation across midnight and idle gaps,
+and read-only doctor/status output. Some tracker tests still use real sleeps and wall time.
 
 The remaining target is a `tick` function that takes `now_wall`, `now_mono`, and state, with
 tests that replay event sequences. Cover switch, blip, merge, idle backdate, audio cap,
@@ -256,7 +261,7 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 7. Add an inotify state watch with a 30 second fallback.
 8. Cap audio and inhibitor-only presence at 2 hours from the last input. Add a presence
    flag that records whether time came from input or audio playback, and show it in the UI.
-9. Add the day timeline and metrics row.
+9. Add the day timeline and metrics row. **Implemented on `v2`.**
 10. Add aliases, ignore, share percentage, and icon backfill.
 11. Add retention rollup and per-row timezone offset.
 12. Add release notes, a changelog, and the bench script.
@@ -346,9 +351,10 @@ These choices are fixed for V1.
 - `src/instance.rs` holds the show and quit socket.
 - `extension/extension.js` reports focus, idle, shield, and sleep state and queries idle
   inhibitors.
-- `ui/app.slint` holds the day, week, hourly, history, search, settings, first-run, and
-  banner views.
-- The current tree has 71 tests, CI, .deb and .rpm packaging, `doctor`, timed pause, the
-  first-run flow, the noise floor, and the Rhythm heatmap. It still has no tray.
+- `ui/app.slint` holds the day metrics row, 24-hour timeline, week, hourly, history,
+  search, settings, first-run, and banner views.
+- The current tree has 79 tests, CI, .deb and .rpm packaging, `doctor`, timed pause, the
+  first-run flow, the noise floor, the Rhythm heatmap, and the day metrics and timeline.
+  It still has no tray.
 - This document is the plan and the review record. Implementation runs on `v1-release`;
   `main` stays untouched.
