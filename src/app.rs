@@ -239,6 +239,8 @@ pub struct AppController {
     setup_open: bool,
     setup_ready: bool,
     setup_busy: bool,
+    setup_installed: bool,
+    extension_system_wide: bool,
     setup_job: Arc<Mutex<Option<Result<crate::platform::Capabilities, String>>>>,
     setup_last_check: Instant,
     theme_signal: Arc<AtomicBool>,
@@ -297,6 +299,8 @@ impl AppController {
             setup_open: false,
             setup_ready: false,
             setup_busy: false,
+            setup_installed: false,
+            extension_system_wide: false,
             setup_job: Arc::new(Mutex::new(None)),
             setup_last_check: Instant::now(),
             theme_signal,
@@ -338,6 +342,9 @@ impl AppController {
             .set_settings_error(self.settings_error.clone().into());
         self.ui.set_setup_ready(self.setup_ready);
         self.ui.set_setup_busy(self.setup_busy);
+        self.ui.set_setup_installed(self.setup_installed);
+        self.ui
+            .set_extension_system_wide(self.extension_system_wide);
         self.ui.set_tracking_title(self.tracking_title().into());
         self.ui
             .set_tracking_detail(self.last_live.detail.clone().into());
@@ -1250,14 +1257,19 @@ impl AppController {
         match result {
             Ok(caps) => {
                 self.setup_ready = caps.state_fresh;
+                self.setup_installed = caps.extension_enabled;
+                self.extension_system_wide = crate::platform::system_extension_available();
                 self.setup_open = true;
                 self.ui.set_setup_open(true);
                 self.ui.set_setup_ready(caps.state_fresh);
-                self.settings.autostart = true;
-                if let Some(store) = &self.store {
-                    let _ = self.settings.save(store);
+                self.ui.set_setup_installed(self.setup_installed);
+                self.ui
+                    .set_extension_system_wide(self.extension_system_wide);
+                // The Start-at-login toggle in the sheet is the user's
+                // choice; apply it as shown instead of forcing autostart on.
+                if let Err(e) = crate::platform::apply_autostart(self.settings.autostart) {
+                    logging::error("autostart", &e);
                 }
-                let _ = crate::platform::apply_autostart(true);
             }
             Err(e) => {
                 logging::error("extension_install", &e);
@@ -1303,6 +1315,53 @@ impl AppController {
         self.setup_ready = ready;
         self.ui.set_setup_open(true);
         self.ui.set_setup_ready(ready);
+        self.force_refresh = true;
+        self.refresh();
+    }
+
+    /// First launch after install: open the setup sheet once, explain the
+    /// one re-login, and offer the Start-at-login toggle. Runs on the UI
+    /// thread and never blocks the rest of the app — the dashboard stays
+    /// interactive behind the sheet. When tracking already works, the first
+    /// run is simply recorded without showing anything. The sheet opens at
+    /// most once: completion is remembered even if the user dismisses it
+    /// without finishing setup.
+    pub fn begin_first_run(&mut self) {
+        if self.setup_open {
+            return;
+        }
+        let caps = crate::platform::capabilities();
+        if !settings::first_run_needed(
+            self.settings.first_run_complete,
+            caps.extension_installed,
+            caps.extension_enabled,
+            caps.state_fresh,
+        ) {
+            self.settings.first_run_complete = true;
+            self.save_settings();
+            return;
+        }
+        self.extension_system_wide = crate::platform::system_extension_available();
+        self.setup_installed = caps.extension_enabled;
+        self.setup_ready = caps.state_fresh;
+        self.setup_open = true;
+        self.settings.first_run_complete = true;
+        self.save_settings();
+        self.ui.set_setup_open(true);
+        self.ui.set_setup_ready(self.setup_ready);
+        self.ui.set_setup_installed(self.setup_installed);
+        self.ui
+            .set_extension_system_wide(self.extension_system_wide);
+        logging::info(
+            "first_run",
+            &format!(
+                "installed={} enabled={} state_fresh={} system_wide={}",
+                caps.extension_installed,
+                caps.extension_enabled,
+                caps.state_fresh,
+                self.extension_system_wide
+            ),
+        );
         self.force_refresh = true;
         self.refresh();
     }

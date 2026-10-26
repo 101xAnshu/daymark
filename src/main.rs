@@ -206,6 +206,10 @@ fn real_main() -> Result<(), String> {
             .borrow_mut()
             .set_external_error(format!("Could not configure startup: {e}"));
     }
+    // First launch after install: open the setup sheet once, explain the
+    // one re-login and offer Start at login. The dashboard behind the sheet
+    // stays fully usable.
+    controller.borrow_mut().begin_first_run();
 
     // A single, inexpensive lifecycle timer. It handles the local IPC socket
     // and refreshes only when visible data actually changed.

@@ -88,6 +88,10 @@ export component AppWindow inherits Window {
     in property <bool> setup-open: false;
     in property <bool> setup-ready: false;
     in property <bool> setup-busy: false;
+    // Setup state detail: whether the install step already ran for this
+    // session, and whether the companion comes from the system package.
+    in property <bool> setup-installed: false;
+    in property <bool> extension-system-wide: false;
     in property <bool> is-wayland: true;
     in property <int> idle-seconds: 300;
     in property <int> retention-days: 365;
