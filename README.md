@@ -104,6 +104,41 @@ To remove it:
   delete/quit actions. A timed pause ends by itself, even while the window is
   hidden; a pause without a deadline ends at the next app start.
 
+## Diagnostics
+
+Two small commands help when tracking looks wrong. Both work while Daymark is
+running and neither changes recorded data.
+
+```bash
+daymark --status   # one stable line for scripts and panels
+daymark doctor     # read-only database, companion and log report
+```
+
+`--status` prints one line in a fixed key/value form:
+
+```
+tracking=active pause=none app="Example Editor"
+```
+
+- `tracking` is `active`, `away`, `paused`, `stale` or `waiting`.
+- `pause` is `none`, `until-resume`, or `until:<unix timestamp>`.
+- `app` appears only while the companion state file is fresh (under 45 seconds)
+  and a focused application is known. The value is quoted and escaped, so the
+  rest of the line stays easy to split.
+
+`doctor` reports the database path, schema version, database and WAL size,
+heartbeat age, whether the companion state file is fresh, the open session and
+today's row count, whether the companion is installed, enabled and which
+version its `metadata.json` declares, whether autostart is installed, the
+retention setting, and the last error in the log. It opens the database in
+read-only mode: it never creates, migrates, recovers or writes it.
+
+Logs are written under `$XDG_STATE_HOME/daymark/logs`, falling back to
+`~/.local/state/daymark/logs`. One file is kept per local day, seven days are
+retained, and each file is readable only by the current user. Only lifecycle
+counts, timings and error text are logged; window titles, URLs and application
+content never are.
+
 ## How it works
 
 On GNOME Wayland, a normal application cannot ask which window has focus; X11
@@ -154,6 +189,9 @@ the dashboard says so and links back to setup.
 - Runtime state: `$XDG_RUNTIME_DIR/daymark/state.json` (mode `0600`).
 - Settings live in the same SQLite database.
 - Autostart: `~/.config/autostart/daymark.desktop` (user-level only).
+- Logs: `$XDG_STATE_HOME/daymark/logs` (fallback
+  `~/.local/state/daymark/logs`), daily files kept for seven days. They contain
+  counts, timings and error text only.
 - Retention: 90 days, 1 year (default), or forever. Pruning removes old sessions
   and orphaned application rows.
 - No analytics, telemetry, network access, window titles, keystrokes,
@@ -183,13 +221,15 @@ open Daymark from the application grid.
 
 ## Verification
 
-- `cargo test --lib`: **38 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **52 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, idle-gap exclusion, per-app totals,
   averages, JSON parsing (including the seconds/milliseconds compatibility
   path), desktop-entry parsing (quoted `Exec`, `NoDisplay`, hidden entries),
   shell-window filtering, SQLite persistence, legacy-row migration, corruption
   recovery, crash recovery, at-most-one-open-session, pruning, settings, single
-  instance, and tracker focus/pause/idle behavior.
+  instance, tracker focus/pause/idle behavior, log rotation, and read-only
+  doctor/status formatting against a temporary database with its write
+  connection still open.
 - The release binary was run on a live GNOME 50.1 Wayland session. The window
   reaches GNOME with app id/WM class `daymark`, so the shell matches it to the
   desktop entry and the companion reports `daymark.desktop` instead of an
@@ -255,6 +295,8 @@ icons, AccessKit accessibility and the X11 backend.
 ```
 src/main.rs           lifecycle, single instance, event loop
 src/app.rs            UI controller and model building
+src/diagnostics.rs    read-only doctor and status summary
+src/logging.rs        daily rotating lifecycle and error log
 src/tracker.rs        focus state file → intervals
 src/db.rs             SQLite schema, migration, recovery, queries
 src/stats.rs          pure day/hour/app aggregation
