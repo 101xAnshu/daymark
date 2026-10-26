@@ -245,6 +245,9 @@ pub struct AppController {
     last_theme_poll: Instant,
     restore_maximized: bool,
     command: Option<Arc<AtomicU8>>,
+    /// Seconds left on the current timed pause, or 0 when there is none.
+    pause_remaining: i64,
+    last_pause_status: String,
 }
 
 impl AppController {
@@ -300,6 +303,8 @@ impl AppController {
             last_theme_poll: Instant::now(),
             restore_maximized: false,
             command,
+            pause_remaining: 0,
+            last_pause_status: String::new(),
         }));
 
         if let Some(icon) = search_icon() {
@@ -321,7 +326,8 @@ impl AppController {
         self.ui.set_view(self.view);
         self.ui.set_maximized(self.ui.window().is_maximized());
         self.ui.global::<Theme>().set_dark(self.dark);
-        self.ui.set_paused(self.settings.paused);
+        self.sync_pause_from_tracker();
+        self.publish_pause_state();
         self.ui.set_idle_seconds(self.settings.idle_seconds as i32);
         self.ui
             .set_retention_days(self.settings.retention_days as i32);
@@ -598,6 +604,53 @@ impl AppController {
         self.force_refresh = false;
     }
 
+    /// The tracker applies a timed pause's expiry on its own thread,
+    /// possibly while the window is hidden. Adopt its pause state so the
+    /// interface reflects a resume that happened in the background.
+    fn sync_pause_from_tracker(&mut self) {
+        let Some(tracker) = &self.tracker else {
+            return;
+        };
+        let live_settings = tracker.settings();
+        if live_settings.paused != self.settings.paused
+            || live_settings.paused_until != self.settings.paused_until
+        {
+            self.settings.paused = live_settings.paused;
+            self.settings.paused_until = live_settings.paused_until;
+        }
+    }
+
+    /// The pause state as the interface should show it: whether tracking
+    /// appears paused, and the seconds left on a timed pause. A deadline
+    /// that has already passed is shown as resumed; the tracker confirms
+    /// it within one tick.
+    fn pause_state(&self) -> (bool, i64) {
+        let settings = &self.settings;
+        if !settings.paused {
+            return (false, 0);
+        }
+        let now = crate::date::unix_now();
+        if settings.paused_until > now {
+            (true, settings.paused_until - now)
+        } else if settings.paused_until == 0 {
+            (true, 0)
+        } else {
+            (false, 0)
+        }
+    }
+
+    /// Push the pause state, including the remaining time of a timed
+    /// pause, to the interface.
+    fn publish_pause_state(&mut self) {
+        let (paused, remaining) = self.pause_state();
+        self.pause_remaining = remaining;
+        self.ui.set_paused(paused);
+        self.ui.set_pause_remaining(remaining as i32);
+        let status = pause_status_line(paused, remaining);
+        self.last_pause_status = status.clone();
+        self.ui.set_pause_status(status.into());
+    }
+
     fn comparison_text(&self, rows: &[SessionRow], day: Day, total: i64, store: &Store) -> String {
         if total <= 0 {
             if !store.has_any_sessions() && self.selected_offset == 0 {
@@ -656,6 +709,15 @@ impl AppController {
     }
 
     fn update_banner(&mut self) {
+        // The pause banner says when a timed pause ends on its own.
+        let paused_body = if self.pause_remaining > 0 {
+            format!(
+                "No new time is being counted. Tracking resumes on its own in {}.",
+                date::format_duration(self.pause_remaining)
+            )
+        } else {
+            "No new time is being counted until you resume.".to_string()
+        };
         let (show, title, body, action, kind) = match self.last_live.status {
             TrackingStatus::NeedsSetup => (
                 true,
@@ -681,7 +743,7 @@ impl AppController {
             TrackingStatus::Paused => (
                 true,
                 "Tracking is paused",
-                "No new time is being counted until you resume.",
+                paused_body.as_str(),
                 "Resume",
                 1,
             ),
@@ -798,6 +860,7 @@ impl AppController {
             controller.borrow().ui.on_resume_tracking(move || {
                 let mut ctl = c.borrow_mut();
                 ctl.settings.paused = false;
+                ctl.settings.paused_until = 0;
                 ctl.save_settings();
                 ctl.force_refresh = true;
                 ctl.refresh();
@@ -884,9 +947,15 @@ impl AppController {
         }
         {
             let c = controller.clone();
-            controller.borrow().ui.on_set_paused(move |paused| {
+            // `seconds` is the pause length; 0 means "until resumed".
+            controller.borrow().ui.on_pause_for(move |seconds| {
                 let mut ctl = c.borrow_mut();
-                ctl.settings.paused = paused;
+                ctl.settings.paused = true;
+                ctl.settings.paused_until = if seconds > 0 {
+                    crate::date::unix_now() + seconds as i64
+                } else {
+                    0
+                };
                 ctl.save_settings();
                 ctl.force_refresh = true;
                 ctl.refresh();
@@ -1074,6 +1143,16 @@ impl AppController {
         if !self.ui.window().is_visible() {
             return;
         }
+        // While a pause runs, refresh when its status line changes — the
+        // remaining time moves a minute at a time.
+        if self.settings.paused {
+            let (paused_now, remaining_now) = self.pause_state();
+            let status = pause_status_line(paused_now, remaining_now);
+            if status != self.last_pause_status {
+                self.last_pause_status = status;
+                self.force_refresh = true;
+            }
+        }
         if self.force_refresh {
             self.refresh();
             return;
@@ -1220,4 +1299,20 @@ fn today_offset(today: Day, day: Day) -> i32 {
     // Day boundaries are local, so round the difference to the nearest day.
     let diff = day.start_ts() - today.start_ts();
     (diff as f64 / 86_400.0).round() as i32
+}
+
+/// One-line description of the pause state for the settings panel and the
+/// background-resume path: empty while tracking runs.
+fn pause_status_line(paused: bool, remaining: i64) -> String {
+    if !paused {
+        return String::new();
+    }
+    if remaining > 0 {
+        format!(
+            "Paused — {} remaining",
+            date::format_duration(remaining)
+        )
+    } else {
+        "Paused until you resume".to_string()
+    }
 }
