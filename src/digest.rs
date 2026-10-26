@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::date::{self, Day};
 use crate::db::Store;
+use crate::settings::Settings;
 use crate::stats;
 
 /// A completed week, oldest day first.
@@ -175,6 +176,37 @@ pub fn write_notification(digest: &Digest) -> Result<(), String> {
     write_notification_at(&crate::db::runtime_dir(), digest)
 }
 
+/// Deliver the completed week's digest when it is due and enabled. The
+/// notification is written for the companion; `digest_last_sent` is updated
+/// only after the write succeeds.
+pub fn deliver_if_due_at(
+    store: &Store,
+    settings: &mut Settings,
+    today: Day,
+    runtime_dir: &Path,
+) -> Result<bool, String> {
+    if !settings.digest_enabled {
+        return Ok(false);
+    }
+    let last_sent =
+        (settings.digest_last_sent > 0).then(|| Day::from_timestamp(settings.digest_last_sent));
+    let Some(week_end) = due_week_end(today, last_sent) else {
+        return Ok(false);
+    };
+    let Some(digest) = build(store, week_end)? else {
+        return Ok(false);
+    };
+    write_notification_at(runtime_dir, &digest)?;
+    settings.digest_last_sent = week_end.start_ts();
+    settings.save(store)?;
+    Ok(true)
+}
+
+/// Deliver through the live runtime directory.
+pub fn deliver_if_due(store: &Store, settings: &mut Settings, today: Day) -> Result<bool, String> {
+    deliver_if_due_at(store, settings, today, &crate::db::runtime_dir())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +363,24 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn the_digest_is_delivered_once_and_remembers_the_week() {
+        let dir = TempDir::new("deliver");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::new(2026, 10, 26);
+        let week_day = Day::new(2026, 10, 20);
+        seed(&store, week_day, "Editor", 3600);
+        let runtime = dir.0.join("runtime");
+        let mut settings = Settings {
+            digest_enabled: true,
+            ..Settings::default()
+        };
+
+        assert!(deliver_if_due_at(&store, &mut settings, today, &runtime).unwrap());
+        assert_eq!(settings.digest_last_sent, today.add_days(-1).start_ts());
+        assert!(runtime.join("notify.json").is_file());
+        assert!(!deliver_if_due_at(&store, &mut settings, today, &runtime).unwrap());
     }
 }
