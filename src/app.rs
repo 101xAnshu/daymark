@@ -1308,10 +1308,7 @@ fn pause_status_line(paused: bool, remaining: i64) -> String {
         return String::new();
     }
     if remaining > 0 {
-        format!(
-            "Paused — {} remaining",
-            date::format_duration(remaining)
-        )
+        format!("Paused — {} remaining", date::format_duration(remaining))
     } else {
         "Paused until you resume".to_string()
     }
