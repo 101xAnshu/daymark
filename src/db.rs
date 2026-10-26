@@ -1,6 +1,7 @@
 //! Local SQLite storage. One small schema, versioned with `user_version`, with
 //! WAL enabled so the interface can read while the tracker writes.
 
+use crate::date::Day;
 use crate::desktop::ResolvedApp;
 use crate::stats::SessionRow;
 use rusqlite::{Connection, params, params_from_iter};
@@ -8,7 +9,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone, Debug)]
 pub struct AppInfo {
@@ -187,6 +188,21 @@ impl Store {
                  COMMIT;",
             )
             .map_err(|e| format!("could not create the database schema: {e}"))?;
+        }
+
+        if version < 3 {
+            conn.execute_batch(
+                "BEGIN;\n\
+                 CREATE TABLE IF NOT EXISTS daily_app_totals (\n\
+                   day_start INTEGER NOT NULL,\n\
+                   app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,\n\
+                   seconds INTEGER NOT NULL,\n\
+                   PRIMARY KEY (day_start, app_id)\n\
+                 );\n\
+                 PRAGMA user_version = 3;\n\
+                 COMMIT;",
+            )
+            .map_err(|e| format!("could not create the daily totals schema: {e}"))?;
         }
 
         // A crash can leave one open interval. Its end timestamp is the last
@@ -398,9 +414,16 @@ impl Store {
 
     pub fn has_any_sessions(&self) -> bool {
         self.conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM sessions LIMIT 1)", [], |r| {
-                r.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT EXISTS(\n\
+                   SELECT 1 FROM sessions\n\
+                   UNION ALL\n\
+                   SELECT 1 FROM daily_app_totals\n\
+                   LIMIT 1\n\
+                 )",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
             .map(|v| v != 0)
             .unwrap_or(false)
     }
@@ -411,21 +434,108 @@ impl Store {
             .unwrap_or(0)
     }
 
-    pub fn prune_before(&self, cutoff: i64) -> Result<usize, String> {
-        let deleted = self
+    /// Totals kept after raw sessions expire. Rows are `(day_start, app_id, seconds)`.
+    pub fn daily_app_totals_between(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<(i64, i64, i64)>, String> {
+        let mut stmt = self
             .conn
-            .execute("DELETE FROM sessions WHERE ended_at < ?1", [cutoff])
+            .prepare(
+                "SELECT day_start, app_id, seconds FROM daily_app_totals\n\
+                 WHERE day_start >= ?1 AND day_start < ?2\n\
+                 ORDER BY day_start, seconds DESC, app_id",
+            )
             .map_err(|e| e.to_string())?;
-        let _ = self.conn.execute(
-            "DELETE FROM apps WHERE id NOT IN (SELECT app_id FROM sessions)",
+        let rows = stmt
+            .query_map(params![start, end], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        Ok(rows)
+    }
+
+    /// Delete raw sessions older than `cutoff`, first folding them into daily
+    /// per-app totals. The rollup is what keeps last year answerable after the
+    /// raw intervals are gone.
+    pub fn prune_before(&self, cutoff: i64) -> Result<usize, String> {
+        let old = {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT app_id, started_at, ended_at FROM sessions\n\
+                     WHERE is_open = 0 AND ended_at < ?1\n\
+                     ORDER BY started_at",
+                )
+                .map_err(|e| e.to_string())?;
+            stmt.query_map([cutoff], |r| {
+                Ok(SessionRow {
+                    app_id: r.get(0)?,
+                    started: r.get(1)?,
+                    ended: r.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>()
+        };
+
+        let mut totals: HashMap<(i64, i64), i64> = HashMap::new();
+        for row in &old {
+            let mut t = row.started;
+            while t < row.ended {
+                let day = Day::from_timestamp(t);
+                let day_end = day.end_ts();
+                let chunk_end = row.ended.min(day_end);
+                if chunk_end <= t {
+                    break;
+                }
+                *totals.entry((day.start_ts(), row.app_id)).or_insert(0) += chunk_end - t;
+                t = chunk_end;
+            }
+        }
+
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        for ((day_start, app_id), seconds) in totals {
+            tx.execute(
+                "INSERT INTO daily_app_totals(day_start, app_id, seconds)\n\
+                 VALUES(?1, ?2, ?3)\n\
+                 ON CONFLICT(day_start, app_id) DO UPDATE SET seconds = seconds + excluded.seconds",
+                params![day_start, app_id, seconds],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let deleted = tx
+            .execute(
+                "DELETE FROM sessions WHERE is_open = 0 AND ended_at < ?1",
+                [cutoff],
+            )
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM apps WHERE id NOT IN (SELECT app_id FROM sessions)\n\
+             AND id NOT IN (SELECT app_id FROM daily_app_totals)",
             [],
-        );
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(deleted)
     }
 
     pub fn delete_all(&self) -> Result<(), String> {
         self.conn
-            .execute_batch("BEGIN;\nDELETE FROM sessions;\nDELETE FROM apps;\nCOMMIT;")
+            .execute_batch(
+                "BEGIN;\n\
+                 DELETE FROM daily_app_totals;\n\
+                 DELETE FROM sessions;\n\
+                 DELETE FROM apps;\n\
+                 COMMIT;",
+            )
             .map_err(|e| e.to_string())
     }
 
@@ -438,21 +548,27 @@ impl Store {
     }
 }
 
-/// One-time repair of rows written before identity resolution was fixed.
+/// Repair rows written before identity resolution was fixed.
 ///
 /// Older builds stored unresolved fallbacks such as `wmclass:gjs` or
 /// `wmclass:com.t3tools.t3code` alongside the real application. Re-resolve
 /// those rows now, move their sessions to the real desktop entry and delete
 /// shell-internal identities so the journal never shows a `gjs` app again.
+/// The check is row-based, so it is safe on new databases and does not touch
+/// the schema version.
 pub fn migrate_legacy_identities(store: &Store) {
-    let version: i64 = match store
+    let has_legacy: bool = store
         .conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-    {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    if version >= 2 {
+        .query_row(
+            "SELECT EXISTS(\n\
+               SELECT 1 FROM apps WHERE key LIKE 'wmclass:%' OR key LIKE 'app:%'\n\
+             )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v != 0)
+        .unwrap_or(false);
+    if !has_legacy {
         return;
     }
     let index = crate::desktop::DesktopIndex::load();
@@ -498,7 +614,6 @@ pub fn migrate_legacy_identities(store: &Store) {
         }
     }
     let _ = store.conn.execute_batch("COMMIT");
-    let _ = store.conn.execute_batch("PRAGMA user_version = 2");
 }
 
 #[cfg(test)]
@@ -641,6 +756,97 @@ mod tests {
     }
 
     #[test]
+    fn pruning_keeps_daily_totals_and_app_identity() {
+        let dir = TempDir::new("rollup");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let old_day = today.add_days(-100);
+        let id = store.upsert_app(&app("a"), 0).unwrap();
+        let start = old_day.start_ts() + 9 * 3600;
+        let session = store.open_session(id, start).unwrap();
+        store.close_session(session, start + 1800).unwrap();
+
+        let removed = store.prune_before(today.add_days(-30).start_ts()).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(store.session_count(), 0);
+        assert_eq!(
+            store
+                .daily_app_totals_between(old_day.start_ts(), old_day.add_days(1).start_ts())
+                .unwrap(),
+            vec![(old_day.start_ts(), id, 1800)]
+        );
+        assert!(store.app_infos(&[id]).contains_key(&id));
+        assert!(store.has_any_sessions());
+    }
+
+    #[test]
+    fn pruning_twice_does_not_double_count() {
+        let dir = TempDir::new("rollup-twice");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let old_day = today.add_days(-100);
+        let id = store.upsert_app(&app("a"), 0).unwrap();
+        let session = store.open_session(id, old_day.start_ts() + 3600).unwrap();
+        store
+            .close_session(session, old_day.start_ts() + 3600 + 900)
+            .unwrap();
+
+        let cutoff = today.add_days(-30).start_ts();
+        store.prune_before(cutoff).unwrap();
+        store.prune_before(cutoff).unwrap();
+        assert_eq!(
+            store
+                .daily_app_totals_between(old_day.start_ts(), old_day.add_days(1).start_ts())
+                .unwrap(),
+            vec![(old_day.start_ts(), id, 900)]
+        );
+    }
+
+    #[test]
+    fn a_session_crossing_midnight_rolls_into_both_days() {
+        let dir = TempDir::new("rollup-midnight");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let day = today.add_days(-100);
+        let next = day.add_days(1);
+        let id = store.upsert_app(&app("a"), 0).unwrap();
+        let start = day.start_ts() + 23 * 3600 + 1800;
+        let end = next.start_ts() + 1800;
+        let session = store.open_session(id, start).unwrap();
+        store.close_session(session, end).unwrap();
+
+        store.prune_before(today.add_days(-30).start_ts()).unwrap();
+        assert_eq!(
+            store
+                .daily_app_totals_between(day.start_ts(), next.add_days(1).start_ts())
+                .unwrap(),
+            vec![(day.start_ts(), id, 1800), (next.start_ts(), id, 1800)]
+        );
+    }
+
+    #[test]
+    fn delete_all_clears_rolled_up_totals() {
+        let dir = TempDir::new("rollup-delete");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let old_day = today.add_days(-100);
+        let id = store.upsert_app(&app("a"), 0).unwrap();
+        let session = store.open_session(id, old_day.start_ts() + 3600).unwrap();
+        store
+            .close_session(session, old_day.start_ts() + 4200)
+            .unwrap();
+        store.prune_before(today.add_days(-30).start_ts()).unwrap();
+        store.delete_all().unwrap();
+        assert!(!store.has_any_sessions());
+        assert!(
+            store
+                .daily_app_totals_between(0, i64::MAX)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn a_short_session_merges_into_a_closed_one() {
         let dir = TempDir::new("merge");
         let store = Store::open_at(&dir.db()).unwrap();
@@ -696,7 +902,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
