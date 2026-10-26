@@ -7,16 +7,58 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::db;
 
-/// Set by the socket listener, consumed by the UI thread.
-pub const COMMAND_NONE: u8 = 0;
-pub const COMMAND_SHOW: u8 = 1;
-pub const COMMAND_QUIT: u8 = 2;
+/// Set by the socket listener, consumed by the UI thread. The low byte is the
+/// command; the upper bits carry a pause length when the command is
+/// [`COMMAND_PAUSE`]. One atomic keeps the pair consistent for the reader.
+pub const COMMAND_NONE: u64 = 0;
+pub const COMMAND_SHOW: u64 = 1;
+pub const COMMAND_QUIT: u64 = 2;
+pub const COMMAND_PAUSE: u64 = 3;
+pub const COMMAND_RESUME: u64 = 4;
+
+const COMMAND_MASK: u64 = 0xff;
+const PAUSE_SHIFT: u32 = 8;
+
+/// A pause longer than this is clamped. The menu only uses 15 minutes and one
+/// hour, but the socket is a local interface and should stay bounded.
+pub const MAX_PAUSE_SECONDS: i64 = 30 * 24 * 60 * 60;
+
+/// Encode a pause length (0 means "until resumed") into the command word.
+pub fn pause_command(seconds: i64) -> u64 {
+    let seconds = seconds.clamp(0, MAX_PAUSE_SECONDS) as u64;
+    COMMAND_PAUSE | (seconds << PAUSE_SHIFT)
+}
+
+/// The command byte, with any pause payload removed.
+pub fn command_kind(command: u64) -> u64 {
+    command & COMMAND_MASK
+}
+
+/// The pause length carried by a [`COMMAND_PAUSE`] word.
+pub fn pause_seconds(command: u64) -> i64 {
+    (command >> PAUSE_SHIFT) as i64
+}
+
+/// Parse one line from the local socket. Pure so the command mapping can be
+/// tested without a listener or a live application.
+fn parse_command(text: &str) -> Option<u64> {
+    match text {
+        "quit" => Some(COMMAND_QUIT),
+        "show" => Some(COMMAND_SHOW),
+        "resume" => Some(COMMAND_RESUME),
+        "pause" => Some(pause_command(0)),
+        other => other
+            .strip_prefix("pause ")
+            .and_then(|seconds| seconds.trim().parse::<i64>().ok())
+            .map(pause_command),
+    }
+}
 
 pub struct InstanceGuard {
     _lock: std::fs::File,
@@ -45,8 +87,21 @@ fn send(command: &str) -> bool {
     false
 }
 
+pub fn request_show() -> bool {
+    send("show")
+}
+
 pub fn request_quit() -> bool {
     send("quit")
+}
+
+/// Pause for `seconds`, or until the user resumes when it is zero.
+pub fn request_pause(seconds: i64) -> bool {
+    send(&format!("pause {}", seconds.clamp(0, MAX_PAUSE_SECONDS)))
+}
+
+pub fn request_resume() -> bool {
+    send("resume")
 }
 
 impl InstanceGuard {
@@ -97,7 +152,7 @@ impl InstanceGuard {
     pub fn listen(
         &self,
         shutting_down: Arc<AtomicBool>,
-        command: Arc<AtomicU8>,
+        command: Arc<AtomicU64>,
         waker: Option<Arc<Mutex<Option<std::thread::Thread>>>>,
     ) -> Result<(), String> {
         let listener = self
@@ -119,29 +174,19 @@ impl InstanceGuard {
                     let mut buf = [0u8; 32];
                     let n = stream.read(&mut buf).unwrap_or(0);
                     let text = String::from_utf8_lossy(&buf[..n]);
-                    match text.trim() {
-                        "quit" => {
-                            command.store(COMMAND_QUIT, Ordering::SeqCst);
-                            if let Some(waker) = &waker {
-                                if let Ok(slot) = waker.lock() {
-                                    if let Some(thread) = slot.as_ref() {
-                                        thread.unpark();
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                        "show" => {
-                            command.store(COMMAND_SHOW, Ordering::SeqCst);
-                            if let Some(waker) = &waker {
-                                if let Ok(slot) = waker.lock() {
-                                    if let Some(thread) = slot.as_ref() {
-                                        thread.unpark();
-                                    }
-                                }
+                    let Some(value) = parse_command(text.trim()) else {
+                        continue;
+                    };
+                    command.store(value, Ordering::SeqCst);
+                    if let Some(waker) = &waker {
+                        if let Ok(slot) = waker.lock() {
+                            if let Some(thread) = slot.as_ref() {
+                                thread.unpark();
                             }
                         }
-                        _ => {}
+                    }
+                    if command_kind(value) == COMMAND_QUIT {
+                        break;
                     }
                 }
             })
@@ -171,7 +216,7 @@ mod tests {
         // binary, and no other test relies on XDG_RUNTIME_DIR.
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
         let guard = InstanceGuard::acquire().unwrap().unwrap();
-        let command = Arc::new(AtomicU8::new(COMMAND_NONE));
+        let command = Arc::new(AtomicU64::new(COMMAND_NONE));
         guard
             .listen(Arc::new(AtomicBool::new(false)), command.clone(), None)
             .unwrap();

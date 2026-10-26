@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,7 @@ use slint::{ComponentHandle, Image, ModelRc, SharedPixelBuffer, VecModel};
 
 use crate::date::{self, Day};
 use crate::db::{self, AppInfo, Store};
-use crate::instance::{COMMAND_NONE, COMMAND_QUIT, COMMAND_SHOW};
+use crate::instance::{COMMAND_NONE, COMMAND_QUIT, COMMAND_SHOW, command_kind};
 use crate::logging;
 use crate::settings::{self, Settings, ThemePref};
 use crate::stats::{self, RollupTotal, SessionRow};
@@ -250,7 +250,7 @@ pub struct AppController {
     theme_watch_live: bool,
     last_theme_poll: Instant,
     restore_maximized: bool,
-    command: Option<Arc<AtomicU8>>,
+    command: Option<Arc<AtomicU64>>,
     /// Set while the window is hidden to the background. Slint's own
     /// `is_visible()` stays true for the `hide_without_quitting` backport, so
     /// the controller tracks the lifecycle itself.
@@ -268,7 +268,7 @@ impl AppController {
         store: Option<Store>,
         tracker: Option<TrackerHandle>,
         settings: Settings,
-        command: Option<Arc<AtomicU8>>,
+        command: Option<Arc<AtomicU64>>,
     ) -> Rc<RefCell<Self>> {
         let dark = match settings.theme {
             ThemePref::Light => false,
@@ -1382,7 +1382,8 @@ impl AppController {
     /// Called by the UI timer. Only refreshes when something visible changed.
     pub fn tick(&mut self) {
         if let Some(command) = &self.command {
-            match command.swap(COMMAND_NONE, Ordering::SeqCst) {
+            let value = command.swap(COMMAND_NONE, Ordering::SeqCst);
+            match command_kind(value) {
                 COMMAND_SHOW => {
                     self.force_refresh = true;
                     self.last_theme_poll = Instant::now() - Duration::from_secs(30);

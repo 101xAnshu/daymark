@@ -1,9 +1,11 @@
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use slint::ComponentHandle;
+
+mod tray;
 
 use daymark::AppWindow;
 use daymark::app::AppController;
@@ -158,7 +160,7 @@ fn real_main() -> Result<(), String> {
         None
     };
 
-    let command = Arc::new(AtomicU8::new(COMMAND_NONE));
+    let command = Arc::new(AtomicU64::new(COMMAND_NONE));
     let shutting_down = Arc::new(AtomicBool::new(false));
     let waker: Arc<std::sync::Mutex<Option<std::thread::Thread>>> =
         Arc::new(std::sync::Mutex::new(None));
@@ -270,8 +272,13 @@ fn real_main() -> Result<(), String> {
         .show()
         .map_err(|e| format!("could not show the window: {e}"))?;
 
+    // The tray exists only after the UI does. `--background` never reaches
+    // this point, so its invisible process never owns a tray thread.
+    let _tray = tray::spawn(controller.borrow().tracker_handle());
+
     slint::run_event_loop().map_err(|e| format!("the interface stopped: {e}"))?;
 
+    drop(_tray);
     shutting_down.store(true, Ordering::Relaxed);
     if let Some(tracker) = controller.borrow().tracker_handle() {
         tracker.shutdown();
