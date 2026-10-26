@@ -99,8 +99,10 @@ To remove it:
   **Quit Daymark** in Settings really stops it.
 - Search filters the application list by name. Clicking anywhere outside the
   field releases focus.
-- Settings holds the idle timeout, retention, appearance, autostart, pause,
-  the data folder shortcut, and delete/quit actions.
+- Settings holds the idle timeout, retention, appearance, autostart, pause
+  options (15 minutes, 1 hour, or until resumed), the data folder shortcut, and
+  delete/quit actions. A timed pause ends by itself, even while the window is
+  hidden; a pause without a deadline ends at the next app start.
 
 ## How it works
 
