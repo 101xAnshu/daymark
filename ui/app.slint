@@ -44,6 +44,20 @@ export struct HistoryRow {
     offset: int,
 }
 
+export struct MetricRow {
+    label: string,
+    value: string,
+    detail: string,
+    show-rule: bool,
+    accent: bool,
+}
+
+export struct TimelineSegment {
+    start: float,
+    width: float,
+    tint: color,
+}
+
 export component AppWindow inherits Window {
     title: "Daymark";
     preferred-width: 1120px;
@@ -72,6 +86,9 @@ export component AppWindow inherits Window {
     in property <string> apps-caption: "";
     in property <string> peak-text: "";
     in property <[HourBar]> hours: [];
+    in property <[MetricRow]> metrics: [];
+    in property <[TimelineSegment]> timeline: [];
+    in property <bool> has-timeline: false;
     in property <[HeatRow]> heatmap: [];
     in property <string> heatmap-total: "";
     in property <bool> has-heatmap: false;
