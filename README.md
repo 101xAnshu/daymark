@@ -193,7 +193,9 @@ graphical session.
 - The 24-hour timeline draws each recorded session as a small block, coloured
   by app and clipped to the selected day. It comes from the same stored
   intervals as the rest of the view and holds no window titles, URLs or
-  network data.
+  network data. When recorded time had audio or an idle inhibitor active, a
+  quiet note under the timeline says how much, and the metrics row keeps its
+  existing four columns at the 900 px minimum width.
 - `T` returns to today; `Ctrl+1` / `Ctrl+2` / `Ctrl+3` switch between Day,
   History and Rhythm.
 - Rhythm shows the last seven days as a 7×24 heatmap: rows are days, columns
@@ -257,7 +259,10 @@ uses the supported mechanism: a deliberately tiny GNOME Shell companion
 The companion publishes only this to `$XDG_RUNTIME_DIR/daymark/state.json`:
 
 - the focused application's identity (desktop id or WM class) and display name
-- idle, locked and away state, and the precise moment input stopped
+- idle, locked and away state, the precise moment input stopped, and
+  milliseconds since the last input
+- whether an idle inhibitor is active, and whether a session-bus MPRIS player
+  reports `Playing`
 - a heartbeat
 
 It never reads window titles, keystrokes, clipboard data, screenshots or
@@ -290,9 +295,15 @@ index on `sessions(is_open)` makes two simultaneous open intervals impossible.
 Idle detection uses Mutter's core idle monitor with the configured 1–15 minute
 threshold (5 by default). Lock and presence use GNOME's screen shield signals;
 suspend uses systemd-logind's prepare-for-sleep signal; idle inhibitors (a video,
-a presentation) are respected. The tracker also closes the current interval on a
-wall-clock/monotonic discontinuity, so a missed suspend signal cannot turn sleep
-into usage.
+a presentation) and session-bus MPRIS playback are respected. Presence is not
+trusted forever: when audio or an inhibitor is the only thing keeping a session
+open, it ends at the last input plus two hours. The tracker then waits for real
+input before starting a new session, and the status line explains the cap. If
+input was recent, tracking continues normally and the session records whether
+input, audio, an inhibitor or a mix kept it open. The stored presence is shown
+quietly in the Day view; it is not a score. The tracker also closes the current
+interval on a wall-clock/monotonic discontinuity, so a missed suspend signal
+cannot turn sleep into usage.
 
 If the companion stops reporting, Daymark stops recording rather than guessing;
 the dashboard says so and links back to setup.
@@ -386,9 +397,10 @@ created.
   the state file, advanced its heartbeat, honored the idle threshold, reported
   `away`, and shut down cleanly.
 - Visual states (light, dark, populated, empty, first run, setup, history,
-  settings, error and focused search) were rendered through the application's
-  own software renderer at 1120×780 and 900×620 and inspected. Snapshots are
-  written opaque, so the images in `docs/` display correctly everywhere.
+  presence, settings, error and focused search) were rendered through the
+  application's own software renderer at 1120×780 and 900×620 and inspected.
+  Snapshots are written opaque, so the images in `docs/` display correctly
+  everywhere.
 
 ## Measured results
 
@@ -437,6 +449,10 @@ the X11 backend.
   defence.
 - Lock and suspend handling is implemented against GNOME's screen shield and
   logind signals; the idle path is covered by the headless integration test.
+- Audio presence depends on a player exposing `org.mpris.MediaPlayer2` on the
+  session bus. A player that does not use MPRIS is invisible to the cap, so the
+  timer falls back to plain idle detection. A live GNOME session is needed to
+  confirm playback, pause and player-exit behavior end to end.
 - Accessibility exposes roles and labels (AccessKit), not a hand-tuned
   screen-reader reading order. Contrast, large targets and full keyboard
   shortcuts are provided.
