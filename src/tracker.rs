@@ -863,6 +863,13 @@ impl Tracker {
             );
             return false;
         }
+        let merged = prev.presence.merge(presence);
+        if let Err(e) = self.store.set_session_presence(prev.db_id, merged.code()) {
+            self.set_status(
+                TrackingStatus::Error,
+                format!("Could not update presence: {e}"),
+            );
+        }
         self.current = Some(OpenSession {
             db_id: prev.db_id,
             app_id: prev.app_id,
@@ -872,7 +879,7 @@ impl Tracker {
             started: prev.started,
             accumulated: prev.ended - prev.started,
             last_heartbeat: prev.ended,
-            presence: prev.presence.merge(presence),
+            presence: merged,
         });
         self.publish_current();
         true
@@ -889,7 +896,10 @@ impl Tracker {
                 return;
             }
         };
-        match self.store.open_session(app_id, now) {
+        match self
+            .store
+            .open_session_with_presence(app_id, now, presence.code())
+        {
             Ok(db_id) => {
                 self.current = Some(OpenSession {
                     db_id,
@@ -1134,8 +1144,13 @@ impl Tracker {
             }
         } else {
             let mut heartbeat = None;
+            let mut presence_update = None;
             let published = if let Some(session) = &mut self.current {
-                session.presence = session.presence.merge(presence);
+                let merged = session.presence.merge(presence);
+                if merged != session.presence {
+                    session.presence = merged;
+                    presence_update = Some((session.db_id, merged.code()));
+                }
                 session.accumulated = session.accumulated.saturating_add(delta);
                 let end = session.started.saturating_add(session.accumulated);
                 if end - session.last_heartbeat >= 30 {
@@ -1154,6 +1169,14 @@ impl Tracker {
             } else {
                 None
             };
+            if let Some((db_id, presence)) = presence_update {
+                if let Err(e) = self.store.set_session_presence(db_id, presence) {
+                    self.set_status(
+                        TrackingStatus::Error,
+                        format!("Could not update presence: {e}"),
+                    );
+                }
+            }
             if let Some((db_id, end)) = heartbeat {
                 if let Err(e) = self.store.heartbeat_session(db_id, end) {
                     self.set_status(

@@ -9,7 +9,18 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
+
+/// The only values stored in `sessions.presence`. Anything unrecognised falls
+/// back to input so an older or malformed caller cannot break the journal.
+fn presence_code(value: &str) -> &'static str {
+    match value {
+        "inhibitor" => "inhibitor",
+        "audio" => "audio",
+        "mixed" => "mixed",
+        _ => "input",
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AppInfo {
@@ -205,6 +216,19 @@ impl Store {
             .map_err(|e| format!("could not create the daily totals schema: {e}"))?;
         }
 
+        if version < 4 {
+            // Existing rows were recorded from focus or input, so 'input' is
+            // the honest default. The column is additive: rollups, indexes
+            // and app identity keep working unchanged.
+            conn.execute_batch(
+                "BEGIN;\n\
+                 ALTER TABLE sessions ADD COLUMN presence TEXT NOT NULL DEFAULT 'input';\n\
+                 PRAGMA user_version = 4;\n\
+                 COMMIT;",
+            )
+            .map_err(|e| format!("could not add the presence column: {e}"))?;
+        }
+
         // A crash can leave one open interval. Its end timestamp is the last
         // heartbeat, so the sleeping gap is never credited to the application.
         conn.execute("UPDATE sessions SET is_open = 0 WHERE is_open = 1", [])
@@ -265,14 +289,60 @@ impl Store {
     }
 
     pub fn open_session(&self, app_id: i64, start: i64) -> Result<i64, String> {
+        self.open_session_with_presence(app_id, start, "input")
+    }
+
+    pub fn open_session_with_presence(
+        &self,
+        app_id: i64,
+        start: i64,
+        presence: &str,
+    ) -> Result<i64, String> {
         self.conn
             .execute(
-                "INSERT INTO sessions(app_id, started_at, ended_at, is_open)\n\
-                 VALUES(?1, ?2, ?2, 1)",
-                params![app_id, start],
+                "INSERT INTO sessions(app_id, started_at, ended_at, is_open, presence)\n\
+                 VALUES(?1, ?2, ?2, 1, ?3)",
+                params![app_id, start, presence_code(presence)],
             )
             .map_err(|e| format!("could not start a session: {e}"))?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Upgrade the recorded presence of a session. The tracker uses a
+    /// monotonic merge before calling this, so the value never goes back to
+    /// input for the same row.
+    pub fn set_session_presence(&self, id: i64, presence: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE sessions SET presence = ?1 WHERE id = ?2",
+                params![presence_code(presence), id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn session_presence(&self, id: i64) -> Option<String> {
+        self.conn
+            .query_row("SELECT presence FROM sessions WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .ok()
+    }
+
+    /// Seconds on a day that belong to sessions with audio, inhibitor or mixed
+    /// presence. Raw intervals only; the current live interval is added by the
+    /// interface. A session crossing midnight is clipped to the requested day.
+    pub fn presence_seconds_between(&self, start: i64, end: i64) -> Result<i64, String> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(MIN(ended_at, ?2) - MAX(started_at, ?1)), 0)\n\
+                 FROM sessions\n\
+                 WHERE is_open = 0 AND presence != 'input'\n\
+                   AND ended_at > ?1 AND started_at < ?2",
+                params![start, end],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
     }
 
     pub fn heartbeat_session(&self, id: i64, end: i64) -> Result<(), String> {
@@ -902,7 +972,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
