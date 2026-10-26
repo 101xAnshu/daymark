@@ -25,6 +25,10 @@ rusqlite = { version = "0.37", default-features = false, features = ["bundled"] 
 libc = "0.2"
 png = "0.18"
 inotify = { version = "0.11", default-features = false }
+# The tray is optional: the blocking API with async-io keeps a Tokio runtime
+# out of the dependency tree. When no StatusNotifierWatcher is present, the
+# tray thread stops after one log line and the rest of the app is unaffected.
+ksni = { version = "0.3.7", default-features = false, features = ["blocking", "async-io"] }
 
 [build-dependencies]
 slint-build = "=1.8.0"
