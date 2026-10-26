@@ -16,6 +16,43 @@ pub struct SessionRow {
     pub ended: i64,
 }
 
+/// A day's preserved per-application total. Raw intervals are folded into these
+/// rows before retention deletes them, so the day stays answerable without
+/// carrying hourly detail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RollupTotal {
+    pub day_start: i64,
+    pub app_id: i64,
+    pub seconds: i64,
+}
+
+/// Raw intervals and preserved daily totals for the same date range. A day is
+/// answered from at most one source: raw intervals win for a day that still has
+/// them, so a day present in both places is never counted twice.
+#[derive(Clone, Debug, Default)]
+pub struct DayData {
+    pub rows: Vec<SessionRow>,
+    pub rollups: Vec<RollupTotal>,
+}
+
+/// The part of a day the interface can honestly show. `has_intervals` decides
+/// whether the timeline and hourly chart have data at all.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DayTotals {
+    pub total: i64,
+    pub apps: Vec<(i64, i64)>,
+    pub has_intervals: bool,
+    pub has_rollup: bool,
+}
+
+impl DayTotals {
+    /// A day whose raw intervals aged out. The total and per-app split survive,
+    /// but the hour of day does not, so the interface must not invent it.
+    pub fn totals_only(&self) -> bool {
+        self.has_rollup && !self.has_intervals
+    }
+}
+
 /// One session on the day timeline, as a fraction of the local day. Fractions
 /// rather than pixels keep the UI independent of the window width.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,6 +130,80 @@ pub fn total_for_day(rows: &[SessionRow], day: Day) -> i64 {
     rows.iter()
         .map(|r| overlap(r.started, r.ended, start, end))
         .sum()
+}
+
+/// Whether the day still has any raw interval to draw.
+pub fn day_has_intervals(rows: &[SessionRow], day: Day) -> bool {
+    rows.iter().any(|r| clipped_span(r, day).is_some())
+}
+
+/// Rollup rows that belong to `day`.
+fn rollups_for_day(rollups: &[RollupTotal], day: Day) -> impl Iterator<Item = &RollupTotal> {
+    let start = day.start_ts();
+    rollups.iter().filter(move |r| r.day_start == start)
+}
+
+/// Total and per-app split for one day, drawn from raw intervals when the day
+/// still has them and from the preserved rollup otherwise. Never both.
+pub fn day_totals(rows: &[SessionRow], rollups: &[RollupTotal], day: Day) -> DayTotals {
+    let has_intervals = day_has_intervals(rows, day);
+    let mut has_rollup = rollups_for_day(rollups, day).next().is_some();
+
+    if has_intervals {
+        let aggregate = aggregate_day(rows, day);
+        return DayTotals {
+            total: aggregate.total,
+            apps: aggregate.apps,
+            has_intervals: true,
+            has_rollup,
+        };
+    }
+
+    let mut apps: HashMap<i64, i64> = HashMap::new();
+    for rollup in rollups_for_day(rollups, day) {
+        *apps.entry(rollup.app_id).or_insert(0) += rollup.seconds;
+    }
+    let mut apps: Vec<(i64, i64)> = apps.into_iter().filter(|(_, v)| *v > 0).collect();
+    apps.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    has_rollup = !apps.is_empty();
+    let total = apps.iter().map(|(_, seconds)| *seconds).sum();
+    DayTotals {
+        total,
+        apps,
+        has_intervals: false,
+        has_rollup,
+    }
+}
+
+pub fn total_with_rollups(rows: &[SessionRow], rollups: &[RollupTotal], day: Day) -> i64 {
+    day_totals(rows, rollups, day).total
+}
+
+/// Totals for `days` consecutive days ending at `end` (inclusive), oldest
+/// first, with each day answered from raw intervals or its rollup.
+pub fn totals_ending_at_with_rollups(
+    rows: &[SessionRow],
+    rollups: &[RollupTotal],
+    end: Day,
+    days: i64,
+) -> Vec<(Day, i64)> {
+    (0..days)
+        .map(|i| {
+            let day = end.add_days(-(days - 1 - i) as i32);
+            (day, total_with_rollups(rows, rollups, day))
+        })
+        .collect()
+}
+
+/// Difference from the same weekday one week earlier, using rollups when raw
+/// intervals for that day have already aged out.
+pub fn week_delta_with_rollups(
+    rows: &[SessionRow],
+    rollups: &[RollupTotal],
+    day: Day,
+) -> Option<i64> {
+    let previous = total_with_rollups(rows, rollups, day.add_days(-7));
+    (previous > 0).then(|| total_with_rollups(rows, rollups, day) - previous)
 }
 
 /// The part of a stored interval that falls inside `day`, if any.
@@ -584,5 +695,80 @@ mod tests {
         let first_minutes = (segments[0].end - segments[0].start) * day_seconds / 60.0;
         assert!((first_minutes - 60.0).abs() < 1.0);
         assert_eq!(segments[1].app_id, 2);
+    }
+
+    fn rollup(day: Day, app_id: i64, seconds: i64) -> RollupTotal {
+        RollupTotal {
+            day_start: day.start_ts(),
+            app_id,
+            seconds,
+        }
+    }
+
+    #[test]
+    fn a_rolled_up_day_keeps_its_total_and_apps_without_intervals() {
+        let day = Day::today();
+        let rollups = [rollup(day, 1, 3600), rollup(day, 2, 1800)];
+        let totals = day_totals(&[], &rollups, day);
+        assert_eq!(totals.total, 5400);
+        assert_eq!(totals.apps, vec![(1, 3600), (2, 1800)]);
+        assert!(!totals.has_intervals);
+        assert!(totals.has_rollup);
+        assert!(totals.totals_only());
+    }
+
+    #[test]
+    fn raw_intervals_win_over_a_rollup_for_the_same_day() {
+        let day = Day::today();
+        let rows = [SessionRow {
+            app_id: 1,
+            started: at(day, 9, 0),
+            ended: at(day, 9, 30),
+        }];
+        let rollups = [rollup(day, 1, 10 * 3600), rollup(day, 2, 3600)];
+        let totals = day_totals(&rows, &rollups, day);
+        assert_eq!(totals.total, 1800);
+        assert_eq!(totals.apps, vec![(1, 1800)]);
+        assert!(totals.has_intervals);
+        assert!(!totals.totals_only());
+    }
+
+    #[test]
+    fn an_old_empty_day_is_zero_and_not_totals_only() {
+        let day = Day::today().add_days(-400);
+        let totals = day_totals(&[], &[], day);
+        assert_eq!(totals.total, 0);
+        assert!(totals.apps.is_empty());
+        assert!(!totals.has_intervals);
+        assert!(!totals.has_rollup);
+        assert!(!totals.totals_only());
+    }
+
+    #[test]
+    fn totals_ending_at_choose_the_source_per_day() {
+        let day = Day::today();
+        let rolled = day.add_days(-3);
+        let raw = day.add_days(-1);
+        let empty = day.add_days(-2);
+        let rows = [SessionRow {
+            app_id: 1,
+            started: at(raw, 9, 0),
+            ended: at(raw, 10, 0),
+        }];
+        let rollups = [rollup(rolled, 2, 45 * 60)];
+        let totals = totals_ending_at_with_rollups(&rows, &rollups, day, 4);
+        assert_eq!(
+            totals,
+            vec![(rolled, 45 * 60), (empty, 0), (raw, 3600), (day, 0),]
+        );
+    }
+
+    #[test]
+    fn week_delta_reads_the_rolled_up_weekday() {
+        let day = Day::today();
+        let previous = day.add_days(-7);
+        let rollups = [rollup(previous, 1, 20 * 60), rollup(day, 1, 35 * 60)];
+        assert_eq!(week_delta_with_rollups(&[], &rollups, day), Some(15 * 60));
+        assert_eq!(week_delta_with_rollups(&[], &[], day), None);
     }
 }

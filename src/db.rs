@@ -3,7 +3,7 @@
 
 use crate::date::Day;
 use crate::desktop::ResolvedApp;
-use crate::stats::SessionRow;
+use crate::stats::{DayData, RollupTotal, SessionRow};
 use rusqlite::{Connection, params, params_from_iter};
 use std::collections::HashMap;
 use std::fs;
@@ -528,6 +528,23 @@ impl Store {
         Ok(rows)
     }
 
+    /// Raw intervals plus preserved daily totals for a date range. The caller
+    /// decides per day which source wins: `day_totals` prefers raw intervals,
+    /// so a day still present in both places is never counted twice.
+    pub fn day_data_between(&self, start: i64, end: i64) -> Result<DayData, String> {
+        let rows = self.sessions_between(start, end)?;
+        let rollups = self
+            .daily_app_totals_between(start, end)?
+            .into_iter()
+            .map(|(day_start, app_id, seconds)| RollupTotal {
+                day_start,
+                app_id,
+                seconds,
+            })
+            .collect();
+        Ok(DayData { rows, rollups })
+    }
+
     /// Delete raw sessions older than `cutoff`, first folding them into daily
     /// per-app totals. The rollup is what keeps last year answerable after the
     /// raw intervals are gone.
@@ -1012,6 +1029,38 @@ mod tests {
         );
         assert!(store.app_infos(&[id]).contains_key(&id));
         assert!(store.has_any_sessions());
+    }
+
+    #[test]
+    fn day_data_returns_raw_intervals_and_preserved_rollups() {
+        let dir = TempDir::new("day-data");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let old_day = today.add_days(-100);
+        let id = store.upsert_app(&app("a"), 0).unwrap();
+        let old = store.open_session(id, old_day.start_ts() + 3600).unwrap();
+        store
+            .close_session(old, old_day.start_ts() + 3600 + 1800)
+            .unwrap();
+        let recent = store.open_session(id, today.start_ts() + 3600).unwrap();
+        store
+            .close_session(recent, today.start_ts() + 3600 + 600)
+            .unwrap();
+
+        store.prune_before(today.add_days(-30).start_ts()).unwrap();
+        let data = store
+            .day_data_between(old_day.start_ts(), today.end_ts())
+            .unwrap();
+        assert_eq!(data.rows.len(), 1);
+        assert_eq!(data.rows[0].started, today.start_ts() + 3600);
+        assert_eq!(
+            data.rollups,
+            vec![RollupTotal {
+                day_start: old_day.start_ts(),
+                app_id: id,
+                seconds: 1800,
+            }]
+        );
     }
 
     #[test]

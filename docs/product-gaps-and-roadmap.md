@@ -28,7 +28,7 @@ The product should be reliable, private, native, and easy to install and keep ru
 ## V2 progress
 
 - The Rhythm view is implemented on `v2`: a 7×24 heatmap for the last seven days,
-  with hour labels, per-day totals, and a legend. The library has **114 tests**.
+  with hour labels, per-day totals, and a legend. The library has **120 tests**.
 - The Day view now has a metrics row and a 24-hour timeline on `v2`. The metrics row
   reports the longest uninterrupted stretch, distinct apps, time after midnight
   (00:00–05:00), the change from the same weekday last week, and a live Now cell for
@@ -37,8 +37,11 @@ The product should be reliable, private, native, and easy to install and keep ru
   enable it. The decision log is in `docs/v2-decisions.md`.
 - The inotify watch is implemented on `v2`: focus changes wake the tracker immediately,
   with a 30-second safety check and a 2-second fallback when no watch can be created.
-- Retention rollup is implemented in the store: old sessions fold into daily per-app totals
-  before pruning. The history view still needs to read those totals.
+- Retention rollup is implemented in the store and both views: old sessions fold into
+  daily per-app totals before pruning, the Day view keeps the rolled-up total and per-app
+  list with a quiet **Totals only** state for the timeline and by-hour chart, and the
+  fourteen-day History list includes those days. Rollup-only days show only the metrics a
+  daily total can support: distinct apps and the week delta.
 - arm64/aarch64 packages are implemented on `v2`: both package scripts take an architecture
   option, a CI job cross-builds the arm64 `.deb` and aarch64 `.rpm` with cargo-zigbuild, and
   the same job install-tests both under QEMU. The free plan has no native arm64 runners, so
@@ -198,22 +201,29 @@ ignore fields, and a share percentage in the app list.
 Today, Daymark has a calm day view with a metrics row, a 24-hour session timeline,
 7 day bars, a by-hour chart, an app list, a 14 day history, and a 7×24 rhythm view.
 A quiet note under the timeline reports time with audio or an inhibitor when present,
-without adding another metric cell at the 900 px minimum width.
+without adding another metric cell at the 900 px minimum width. Days whose raw
+intervals have aged out keep their total and per-app split and show a **Totals only**
+state in place of the timeline and by-hour chart; only the metrics a daily total can
+support remain.
 
 The heatmap shipped first; the metrics row and day timeline follow it. Keep the calm
 visual language. Do not turn the timeline into hundreds of tiny segments.
 
 ### Retention and time
 
-Today, retention deletes rows, and day queries use today's local timezone.
+Today, retention folds old sessions into daily per-app totals before deleting them,
+and both the Day and History views read the rollup alongside raw intervals. A day
+still shows hourly detail while its intervals exist and a totals-only state after
+they expire. Day queries use today's local timezone.
 
-The target is a daily rollup per app and per domain if domains are added, with a "totals
-only before this date" state. Add `tz_offset_min` to sessions and use it in day queries.
+The remaining target is a per-row timezone offset so travel does not move past
+sessions into another day. A domain rollup would follow only if domains are added.
 
 ### Tests and measurement
 
-The tree now has 108 tests covering date handling, storage, recovery, migration, pruning,
-daily rollup preservation, settings, single instance, tracker behavior, the inotify watch
+The tree now has 120 tests covering date handling, storage, recovery, migration, pruning,
+daily rollup preservation and raw/rollup merging (raw intervals win, totals-only days,
+old empty days), settings, single instance, tracker behavior, the inotify watch
 and fallback, the noise floor and merge, timed pause, log rotation, extension selection,
 the first-run decision, autostart consent, seven-day hourly heatmap aggregation, day
 metrics and timeline segmentation across midnight and idle gaps, idle_ms parsing, the
@@ -289,8 +299,8 @@ windows by design. Stage 1 can be a small title-only site map with no history re
    latches until input returns, and the Day view shows a quiet note.**
 9. Add the day timeline and metrics row. **Implemented on `v2`.**
 10. Add aliases, ignore, share percentage, and icon backfill.
-11. Add retention rollup and per-row timezone offset. **Retention rollup store layer
-    implemented on `v2`; the history view and timezone offset remain.**
+11. Add retention rollup and per-row timezone offset. **Retention rollup is implemented
+    on `v2` across the store, the Day view and History; the timezone offset remains.**
 12. Add release notes, a changelog, and the bench script.
 
 ### P2: V2 insights
@@ -374,7 +384,10 @@ These choices are fixed for V1.
 
 - `src/tracker.rs` holds the 2 second park, the 30 second heartbeat, the 1 second discard,
   the 5 second delta clamp, the midnight split, and the gap detection.
-- `src/db.rs` holds the schema, recovery, migration, and prune logic.
+- `src/db.rs` holds the schema, recovery, migration, prune logic, and the combined
+  raw-interval plus daily-rollup query.
+- `src/stats.rs` picks one source per day: raw intervals while they exist, otherwise the
+  preserved daily total, and reports whether a day is totals only.
 - `src/settings.rs` stores pause, idle, retention, and theme settings.
 - `src/main.rs` starts the 700 ms UI timer, stops it while the window is hidden, and runs
   the `--background` loop.
@@ -385,9 +398,10 @@ These choices are fixed for V1.
   inhibitors, and session-bus MPRIS playback.
 - `ui/app.slint` holds the day metrics row, 24-hour timeline, presence note, week, hourly,
   history, search, settings, first-run, and banner views.
-- The current tree has 114 tests, CI, amd64 and arm64 `.deb` packaging, x86_64 and aarch64
+- The current tree has 120 tests, CI, amd64 and arm64 `.deb` packaging, x86_64 and aarch64
   `.rpm` packaging, `doctor`, timed pause, the first-run flow, the noise floor, the Rhythm
   heatmap, the inotify watch, the day metrics and timeline, the audio/inhibitor presence
-  cap, and the weekly digest computation and transport. It still has no tray.
+  cap, the weekly digest computation and transport, and the retention rollup in the Day
+  and History views. It still has no tray.
 - This document is the plan and the review record. V1 is merged on `main`; V2 runs on
   `v2`.
