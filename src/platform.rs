@@ -115,6 +115,17 @@ fn parse_list(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Append `uuid` to an enabled-extensions list when it is missing. Returns
+/// true when the list changed, so callers only write gsettings on a real
+/// difference.
+fn ensure_uuid(list: &mut Vec<String>, uuid: &str) -> bool {
+    if list.iter().any(|s| s == uuid) {
+        return false;
+    }
+    list.push(uuid.to_string());
+    true
+}
+
 fn gsettings_set_list(key: &str, values: &[String]) -> Result<(), String> {
     let body = values
         .iter()
@@ -184,19 +195,14 @@ fn write_file_if_different(path: &Path, body: &str, mode: u32) -> Result<(), Str
     Ok(())
 }
 
-/// Install or update the companion extension and add it to the list GNOME
-/// loads at the next login. Returns capabilities after the attempt.
-pub fn install_extension() -> Result<Capabilities, String> {
-    let dir = extension_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("could not create the extension folder: {e}"))?;
-    write_file_if_different(&dir.join("metadata.json"), EXTENSION_METADATA, 0o644)?;
-    write_file_if_different(&dir.join("extension.js"), EXTENSION_JS, 0o644)?;
-
+/// Add the companion UUID to GNOME's enabled list without writing any
+/// extension files. Used for the packaged system-wide copy and again after
+/// writing the user-level one.
+fn enable_extension_uuid() -> Result<(), String> {
     let mut enabled = gsettings_get("enabled-extensions")
         .map(|v| parse_list(&v))
         .unwrap_or_default();
-    if !enabled.iter().any(|s| s == EXTENSION_UUID) {
-        enabled.push(EXTENSION_UUID.to_string());
+    if ensure_uuid(&mut enabled, EXTENSION_UUID) {
         gsettings_set_list("enabled-extensions", &enabled)
             .map_err(|e| format!("could not enable the extension: {e}"))?;
     }
@@ -216,7 +222,26 @@ pub fn install_extension() -> Result<Capabilities, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+    Ok(())
+}
 
+/// Install or update the companion extension and add it to the list GNOME
+/// loads at the next login. A packaged system-wide copy
+/// (`/usr/share/gnome-shell/extensions`) is enabled in place: no files are
+/// copied into the home directory, so package upgrades apply on their own.
+/// The user-level write path only runs when no system copy exists, as with
+/// tarball installs. Returns capabilities after the attempt.
+pub fn install_extension() -> Result<Capabilities, String> {
+    if system_extension_available() {
+        enable_extension_uuid()?;
+        return Ok(capabilities());
+    }
+
+    let dir = extension_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("could not create the extension folder: {e}"))?;
+    write_file_if_different(&dir.join("metadata.json"), EXTENSION_METADATA, 0o644)?;
+    write_file_if_different(&dir.join("extension.js"), EXTENSION_JS, 0o644)?;
+    enable_extension_uuid()?;
     Ok(capabilities())
 }
 
@@ -412,6 +437,18 @@ mod tests {
             vec!["a@b.com".to_string(), "c@d.com".to_string()]
         );
         assert_eq!(parse_list("@as []"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn ensure_uuid_is_idempotent() {
+        let mut list = vec!["other@x.com".to_string()];
+        assert!(ensure_uuid(&mut list, EXTENSION_UUID));
+        assert_eq!(
+            list,
+            vec!["other@x.com".to_string(), "daymark@daymark.app".to_string()]
+        );
+        assert!(!ensure_uuid(&mut list, EXTENSION_UUID), "already present");
+        assert_eq!(list.len(), 2, "never duplicated");
     }
 
     #[test]
