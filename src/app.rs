@@ -13,7 +13,10 @@ use slint::{ComponentHandle, Image, ModelRc, SharedPixelBuffer, VecModel};
 
 use crate::date::{self, Day};
 use crate::db::{self, AppInfo, Store};
-use crate::instance::{COMMAND_NONE, COMMAND_QUIT, COMMAND_SHOW, command_kind};
+use crate::instance::{
+    COMMAND_NONE, COMMAND_PAUSE, COMMAND_QUIT, COMMAND_RESUME, COMMAND_SHOW, MAX_PAUSE_SECONDS,
+    command_kind, pause_seconds,
+};
 use crate::logging;
 use crate::settings::{self, Settings, ThemePref};
 use crate::stats::{self, RollupTotal, SessionRow};
@@ -1100,10 +1103,7 @@ impl AppController {
             let c = controller.clone();
             controller.borrow().ui.on_resume_tracking(move || {
                 let mut ctl = c.borrow_mut();
-                ctl.settings.paused = false;
-                ctl.settings.paused_until = 0;
-                ctl.save_settings();
-                ctl.force_refresh = true;
+                ctl.apply_resume();
                 ctl.refresh();
             });
         }
@@ -1220,14 +1220,7 @@ impl AppController {
             // `seconds` is the pause length; 0 means "until resumed".
             controller.borrow().ui.on_pause_for(move |seconds| {
                 let mut ctl = c.borrow_mut();
-                ctl.settings.paused = true;
-                ctl.settings.paused_until = if seconds > 0 {
-                    crate::date::unix_now() + seconds as i64
-                } else {
-                    0
-                };
-                ctl.save_settings();
-                ctl.force_refresh = true;
+                ctl.apply_pause(seconds as i64);
                 ctl.refresh();
             });
         }
@@ -1326,6 +1319,23 @@ impl AppController {
         }
     }
 
+    /// Apply a pause from the tray or the settings sheet. Zero seconds means
+    /// "until resumed". The tracker is updated through the normal settings
+    /// path so it stops counting immediately.
+    fn apply_pause(&mut self, seconds: i64) {
+        self.settings.paused = true;
+        self.settings.paused_until = pause_deadline(crate::date::unix_now(), seconds);
+        self.save_settings();
+        self.force_refresh = true;
+    }
+
+    fn apply_resume(&mut self) {
+        self.settings.paused = false;
+        self.settings.paused_until = 0;
+        self.save_settings();
+        self.force_refresh = true;
+    }
+
     fn save_settings(&mut self) {
         if let Some(store) = &self.store {
             if let Err(e) = self.settings.save(store) {
@@ -1400,6 +1410,12 @@ impl AppController {
                 COMMAND_QUIT => {
                     self.quit();
                     return;
+                }
+                COMMAND_PAUSE => {
+                    self.apply_pause(pause_seconds(value));
+                }
+                COMMAND_RESUME => {
+                    self.apply_resume();
                 }
                 _ => {}
             }
@@ -1661,6 +1677,18 @@ fn presence_note(seconds: i64) -> String {
         "{} with audio or a video playing",
         date::format_duration(seconds)
     )
+}
+
+/// Deadline for a pause starting now. Zero length means "until resumed" and
+/// therefore has no deadline. Bounded like the socket parser so a malformed
+/// command cannot arm a pause far in the future.
+fn pause_deadline(now: i64, seconds: i64) -> i64 {
+    let seconds = seconds.clamp(0, MAX_PAUSE_SECONDS);
+    if seconds > 0 {
+        now.saturating_add(seconds)
+    } else {
+        0
+    }
 }
 
 /// One-line description of the pause state for the settings panel and the
