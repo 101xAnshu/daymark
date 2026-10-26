@@ -110,12 +110,19 @@ fn real_main() -> Result<(), String> {
         logging::info("database", &format!("sessions={}", store.session_count()));
     }
 
-    let autostart_error = daymark::platform::apply_autostart(settings.autostart).err();
+    let autostart_error =
+        daymark::platform::apply_autostart_respecting_disabled(settings.autostart).err();
     if let Some(error) = &autostart_error {
         logging::error("autostart", error);
     }
     if autostart_error.is_some() {
         settings.autostart = daymark::platform::autostart_installed();
+    }
+    // An entry disabled with X-GNOME-Autostart-enabled=false or Hidden=true
+    // is the user's choice: keep it and mirror the effective state in the
+    // interface instead of quietly switching it back on at every launch.
+    if settings.autostart && daymark::platform::autostart_disabled() {
+        settings.autostart = false;
     }
     if let Err(error) = std::fs::create_dir_all(db::runtime_dir()) {
         logging::error("runtime_dir", &error.to_string());
@@ -199,6 +206,10 @@ fn real_main() -> Result<(), String> {
             .borrow_mut()
             .set_external_error(format!("Could not configure startup: {e}"));
     }
+    // First launch after install: open the setup sheet once, explain the
+    // one re-login and offer Start at login. The dashboard behind the sheet
+    // stays fully usable.
+    controller.borrow_mut().begin_first_run();
 
     // A single, inexpensive lifecycle timer. It handles the local IPC socket
     // and refreshes only when visible data actually changed.

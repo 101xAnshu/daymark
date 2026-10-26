@@ -46,6 +46,10 @@ pub struct Settings {
     /// 0 means keep everything.
     pub retention_days: i64,
     pub theme: ThemePref,
+    /// The first-run setup sheet opens only once. False on a fresh install
+    /// and after the sheet has been shown (or was not needed) on the first
+    /// visible launch.
+    pub first_run_complete: bool,
 }
 
 impl Default for Settings {
@@ -57,6 +61,7 @@ impl Default for Settings {
             autostart: true,
             retention_days: 365,
             theme: ThemePref::System,
+            first_run_complete: false,
         }
     }
 }
@@ -91,6 +96,9 @@ impl Settings {
         }
         if let Some(v) = store.get_setting("theme") {
             s.theme = ThemePref::parse(&v);
+        }
+        if let Some(v) = store.get_setting("first_run_complete") {
+            s.first_run_complete = v == "1" || v.eq_ignore_ascii_case("true");
         }
         s
     }
@@ -129,7 +137,28 @@ impl Settings {
             .and_then(|_| store.set_setting("autostart", if self.autostart { "1" } else { "0" }))
             .and_then(|_| store.set_setting("retention_days", &self.retention_days.to_string()))
             .and_then(|_| store.set_setting("theme", self.theme.as_str()))
+            .and_then(|_| {
+                store.set_setting(
+                    "first_run_complete",
+                    if self.first_run_complete { "1" } else { "0" },
+                )
+            })
     }
+}
+
+/// Decide whether the first launch should open the setup sheet. True only
+/// on a first run while tracking is not demonstrably working: the
+/// companion must be installed, enabled, and its state file fresh. The
+/// outcome is remembered (`first_run_complete`) so the sheet opens once and
+/// never nags afterwards. Pure, so tests can cover the decision without a
+/// live GNOME session.
+pub fn first_run_needed(
+    first_run_complete: bool,
+    extension_installed: bool,
+    extension_enabled: bool,
+    state_fresh: bool,
+) -> bool {
+    !first_run_complete && !(extension_installed && extension_enabled && state_fresh)
 }
 
 /// Runtime config consumed by the GNOME extension so its idle watch follows
@@ -240,5 +269,41 @@ mod tests {
         assert!(!settings.pause_expired(119));
         assert!(settings.pause_expired(120));
         assert!(settings.pause_expired(121));
+    }
+
+    #[test]
+    fn the_first_run_sheet_opens_while_tracking_is_not_working() {
+        // Fresh install: nothing set up yet.
+        assert!(first_run_needed(false, false, false, false));
+        // Installed and enabled, but the extension has not run since the
+        // login that loads it: the one re-login still needs explaining.
+        assert!(first_run_needed(false, true, true, false));
+        // Everything works: no sheet, just record completion.
+        assert!(!first_run_needed(false, true, true, true));
+        // Afterwards: never nag again, whatever the state.
+        assert!(!first_run_needed(true, false, false, false));
+        assert!(!first_run_needed(true, true, true, false));
+    }
+
+    #[test]
+    fn the_first_run_marker_round_trips_through_the_store() {
+        let dir = TempDb::new("first-run");
+        let store = Store::open_at(&dir.db()).unwrap();
+
+        let fresh = Settings::load(&store);
+        assert!(!fresh.first_run_complete, "a fresh install runs first-run");
+
+        let done = Settings {
+            first_run_complete: true,
+            ..Settings::default()
+        };
+        done.save(&store).unwrap();
+
+        let reloaded = Settings::load(&store);
+        assert!(reloaded.first_run_complete);
+        assert_eq!(
+            store.get_setting("first_run_complete").as_deref(),
+            Some("1")
+        );
     }
 }

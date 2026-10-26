@@ -88,6 +88,10 @@ export component AppWindow inherits Window {
     in property <bool> setup-open: false;
     in property <bool> setup-ready: false;
     in property <bool> setup-busy: false;
+    // Setup state detail: whether the install step already ran for this
+    // session, and whether the companion comes from the system package.
+    in property <bool> setup-installed: false;
+    in property <bool> extension-system-wide: false;
     in property <bool> is-wayland: true;
     in property <int> idle-seconds: 300;
     in property <int> retention-days: 365;
@@ -1594,7 +1598,7 @@ export component AppWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             width: 468px;
-            height: root.setup-ready ? 330px : 376px;
+            height: root.setup-ready ? 384px : 430px;
             border-radius: Theme.radius-lg;
             background: Theme.surface;
             border-width: 1px;
@@ -1634,8 +1638,14 @@ export component AppWindow inherits Window {
                         }
                         VerticalLayout {
                             horizontal-stretch: 1;
-                            Text { text: "Installed and enabled"; font-size: Theme.body-size; font-weight: 600; color: Theme.text; }
-                            Text { text: "The extension is in your user folder."; font-size: Theme.small-size; color: Theme.text-tertiary; }
+                            Text { text: root.setup-installed ? "Installed and enabled" : "Installed"; font-size: Theme.body-size; font-weight: 600; color: Theme.text; }
+                            Text {
+                                text: root.extension-system-wide
+                                    ? "Daymark uses the companion included with the system package."
+                                    : "The extension is in your user folder.";
+                                font-size: Theme.small-size;
+                                color: Theme.text-tertiary;
+                            }
                         }
                     }
                     Rectangle { height: 18px; background: transparent; }
@@ -1679,19 +1689,56 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                Rectangle { height: 18px; background: transparent; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 1px;
+                        Text {
+                            text: "Start at login";
+                            font-size: Theme.body-size;
+                            color: Theme.text;
+                        }
+                        Text {
+                            text: "keep tracking in the background";
+                            font-size: Theme.micro-size;
+                            color: Theme.text-tertiary;
+                        }
+                    }
+                    Switch {
+                        checked: root.autostart;
+                        toggled(v) => { root.set-autostart(v); }
+                    }
+                }
+
                 Rectangle { vertical-stretch: 1; }
                 Rectangle { height: 18px; background: transparent; }
                 HorizontalLayout {
                     spacing: 8px;
                     Rectangle { horizontal-stretch: 1; }
-                    TextButton {
+                    if (root.setup-ready) : TextButton {
                         label: "Open data folder";
                         clicked => { root.open-data(); }
                     }
-                    PrimaryButton {
-                        label: root.setup-ready ? "Done" : "Got it";
-                        enabled: !root.setup-busy;
+                    if (!root.setup-ready && !root.setup-installed) : TextButton {
+                        label: "Got it";
                         clicked => { root.close-setup(); }
+                    }
+                    PrimaryButton {
+                        label: root.setup-ready
+                            ? "Done"
+                            : (root.setup-installed
+                                ? "Got it"
+                                : (root.setup-busy ? "Setting up…" : "Turn on tracking"));
+                        enabled: !root.setup-busy;
+                        clicked => {
+                            if (root.setup-ready || root.setup-installed) {
+                                root.close-setup();
+                            } else {
+                                root.setup-tracking();
+                            }
+                        }
                     }
                 }
             }

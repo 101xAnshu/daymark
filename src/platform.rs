@@ -42,8 +42,52 @@ pub fn extension_dir() -> PathBuf {
     data.join("gnome-shell/extensions").join(EXTENSION_UUID)
 }
 
+/// Where a package puts the companion: one system-wide, read-only copy
+/// shared by every user of the machine.
+pub fn system_extension_dir() -> PathBuf {
+    PathBuf::from("/usr/share/gnome-shell/extensions").join(EXTENSION_UUID)
+}
+
+/// True when the packaged system-wide companion is present on disk.
+pub fn system_extension_available() -> bool {
+    system_extension_dir().join("metadata.json").is_file()
+}
+
 pub fn state_path() -> PathBuf {
     db::runtime_dir().join("state.json")
+}
+
+/// Which copy of the companion should be enabled for this user. The
+/// system-wide copy wins when present so package upgrades apply to everyone
+/// without touching the home directory; the user-level copy covers tarball
+/// installs where nothing was placed under /usr/share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtensionSource {
+    System,
+    User,
+    None,
+}
+
+/// Pure selection between the system-wide and the user-level copy.
+pub fn select_extension_source(system_present: bool, user_present: bool) -> ExtensionSource {
+    if system_present {
+        ExtensionSource::System
+    } else if user_present {
+        ExtensionSource::User
+    } else {
+        ExtensionSource::None
+    }
+}
+
+/// The companion is usable when either copy exists on disk: the packaged
+/// system-wide one or the user-level one written by tarball installs.
+pub fn extension_installed() -> bool {
+    select_extension_source(system_extension_available(), extension_installed_user())
+        != ExtensionSource::None
+}
+
+fn extension_installed_user() -> bool {
+    extension_dir().join("metadata.json").is_file()
 }
 
 fn gsettings_get(key: &str) -> Option<String> {
@@ -71,6 +115,17 @@ fn parse_list(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Append `uuid` to an enabled-extensions list when it is missing. Returns
+/// true when the list changed, so callers only write gsettings on a real
+/// difference.
+fn ensure_uuid(list: &mut Vec<String>, uuid: &str) -> bool {
+    if list.iter().any(|s| s == uuid) {
+        return false;
+    }
+    list.push(uuid.to_string());
+    true
+}
+
 fn gsettings_set_list(key: &str, values: &[String]) -> Result<(), String> {
     let body = values
         .iter()
@@ -86,10 +141,6 @@ fn gsettings_set_list(key: &str, values: &[String]) -> Result<(), String> {
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
-}
-
-pub fn extension_installed() -> bool {
-    extension_dir().join("metadata.json").is_file()
 }
 
 pub fn extension_enabled() -> bool {
@@ -144,19 +195,14 @@ fn write_file_if_different(path: &Path, body: &str, mode: u32) -> Result<(), Str
     Ok(())
 }
 
-/// Install or update the companion extension and add it to the list GNOME
-/// loads at the next login. Returns capabilities after the attempt.
-pub fn install_extension() -> Result<Capabilities, String> {
-    let dir = extension_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("could not create the extension folder: {e}"))?;
-    write_file_if_different(&dir.join("metadata.json"), EXTENSION_METADATA, 0o644)?;
-    write_file_if_different(&dir.join("extension.js"), EXTENSION_JS, 0o644)?;
-
+/// Add the companion UUID to GNOME's enabled list without writing any
+/// extension files. Used for the packaged system-wide copy and again after
+/// writing the user-level one.
+fn enable_extension_uuid() -> Result<(), String> {
     let mut enabled = gsettings_get("enabled-extensions")
         .map(|v| parse_list(&v))
         .unwrap_or_default();
-    if !enabled.iter().any(|s| s == EXTENSION_UUID) {
-        enabled.push(EXTENSION_UUID.to_string());
+    if ensure_uuid(&mut enabled, EXTENSION_UUID) {
         gsettings_set_list("enabled-extensions", &enabled)
             .map_err(|e| format!("could not enable the extension: {e}"))?;
     }
@@ -176,7 +222,26 @@ pub fn install_extension() -> Result<Capabilities, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+    Ok(())
+}
 
+/// Install or update the companion extension and add it to the list GNOME
+/// loads at the next login. A packaged system-wide copy
+/// (`/usr/share/gnome-shell/extensions`) is enabled in place: no files are
+/// copied into the home directory, so package upgrades apply on their own.
+/// The user-level write path only runs when no system copy exists, as with
+/// tarball installs. Returns capabilities after the attempt.
+pub fn install_extension() -> Result<Capabilities, String> {
+    if system_extension_available() {
+        enable_extension_uuid()?;
+        return Ok(capabilities());
+    }
+
+    let dir = extension_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("could not create the extension folder: {e}"))?;
+    write_file_if_different(&dir.join("metadata.json"), EXTENSION_METADATA, 0o644)?;
+    write_file_if_different(&dir.join("extension.js"), EXTENSION_JS, 0o644)?;
+    enable_extension_uuid()?;
     Ok(capabilities())
 }
 
@@ -254,6 +319,49 @@ pub fn apply_autostart(enabled: bool) -> Result<(), String> {
         fs::write(&path, body).map_err(|e| format!("could not write the autostart entry: {e}"))?;
     }
     Ok(())
+}
+
+/// Whether a desktop-entry body deliberately switches the autostart entry
+/// off. GNOME's own startup tools write `X-GNOME-Autostart-enabled=false`
+/// (or `Hidden=true`) instead of deleting the file; such an entry is the
+/// user's choice. Pure so tests can cover it without a session.
+fn autostart_entry_disabled(body: &str) -> bool {
+    body.lines().any(|line| {
+        let line = line.trim();
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        let key = key.trim();
+        let value = value.trim().to_ascii_lowercase();
+        let truthy = matches!(value.as_str(), "true" | "1");
+        let falsy = matches!(value.as_str(), "false" | "0");
+        if key.eq_ignore_ascii_case("Hidden") {
+            return truthy;
+        }
+        if key.eq_ignore_ascii_case("X-GNOME-Autostart-enabled") {
+            return falsy;
+        }
+        false
+    })
+}
+
+/// Whether the existing autostart entry marks Daymark as disabled. A
+/// missing or unreadable file is not a deliberate disable.
+pub fn autostart_disabled() -> bool {
+    fs::read_to_string(db::autostart_path())
+        .map(|body| autostart_entry_disabled(&body))
+        .unwrap_or(false)
+}
+
+/// Apply the per-launch autostart default without overriding a deliberately
+/// disabled entry: when the existing file says the user turned Daymark off,
+/// it is left exactly as it is. Explicit consent from the interface still
+/// goes through `apply_autostart`, which writes through.
+pub fn apply_autostart_respecting_disabled(enabled: bool) -> Result<(), String> {
+    if enabled && autostart_disabled() {
+        return Ok(());
+    }
+    apply_autostart(enabled)
 }
 
 pub fn autostart_installed() -> bool {
@@ -375,10 +483,65 @@ mod tests {
     }
 
     #[test]
+    fn ensure_uuid_is_idempotent() {
+        let mut list = vec!["other@x.com".to_string()];
+        assert!(ensure_uuid(&mut list, EXTENSION_UUID));
+        assert_eq!(
+            list,
+            vec!["other@x.com".to_string(), "daymark@daymark.app".to_string()]
+        );
+        assert!(!ensure_uuid(&mut list, EXTENSION_UUID), "already present");
+        assert_eq!(list.len(), 2, "never duplicated");
+    }
+
+    #[test]
+    fn the_system_wide_copy_wins_over_the_user_copy() {
+        assert_eq!(select_extension_source(true, true), ExtensionSource::System);
+        assert_eq!(
+            select_extension_source(true, false),
+            ExtensionSource::System
+        );
+        assert_eq!(select_extension_source(false, true), ExtensionSource::User);
+        assert_eq!(select_extension_source(false, false), ExtensionSource::None);
+    }
+
+    #[test]
+    fn the_system_extension_lives_outside_the_home_directory() {
+        assert_eq!(
+            system_extension_dir(),
+            PathBuf::from("/usr/share/gnome-shell/extensions").join(EXTENSION_UUID)
+        );
+        assert_eq!(system_extension_dir().file_name().unwrap(), EXTENSION_UUID);
+    }
+
+    #[test]
     fn quotes_exec_paths_per_desktop_entry_rules() {
         assert_eq!(quote_exec("/usr/bin/daymark"), "/usr/bin/daymark");
         assert_eq!(quote_exec("/home/a b/daymark"), "\"/home/a b/daymark\"");
         assert_eq!(quote_exec("/tmp/a$b"), "\"/tmp/a\\$b\"");
+    }
+
+    #[test]
+    fn a_deliberately_disabled_autostart_entry_is_recognised() {
+        assert!(autostart_entry_disabled("X-GNOME-Autostart-enabled=false"));
+        assert!(autostart_entry_disabled(
+            "[Desktop Entry]\nType=Application\nX-GNOME-Autostart-enabled = false\n"
+        ));
+        assert!(autostart_entry_disabled("[Desktop Entry]\nHidden=true\n"));
+        assert!(autostart_entry_disabled("[Desktop Entry]\nHidden=1\n"));
+        assert!(autostart_entry_disabled(
+            "[Desktop Entry]\nType=Application\nX-GNOME-Autostart-enabled=false\n"
+        ));
+        assert!(!autostart_entry_disabled(
+            autostart_body(Path::new("/usr/bin/daymark")).as_str()
+        ));
+        assert!(!autostart_entry_disabled(
+            "[Desktop Entry]\nType=Application\nX-GNOME-Autostart-enabled=true\nHidden=false\n"
+        ));
+        assert!(!autostart_entry_disabled(
+            "[Desktop Entry]\nType=Application\nExec=/usr/bin/daymark --background\n"
+        ));
+        assert!(!autostart_entry_disabled(""), "empty body is not a disable");
     }
 
     #[test]
