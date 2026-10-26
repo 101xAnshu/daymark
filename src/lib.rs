@@ -7,6 +7,7 @@ pub mod demo;
 pub mod desktop;
 pub mod instance;
 pub mod json;
+pub mod logging;
 pub mod platform;
 pub mod settings;
 pub mod stats;
