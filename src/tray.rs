@@ -438,3 +438,151 @@ fn run(tracker: Option<TrackerHandle>, stop: Arc<AtomicBool>) {
     handle.shutdown();
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pixel(icon: &Icon, x: i32, y: i32) -> [u8; 4] {
+        let offset = ((y * ICON_SIZE + x) * 4) as usize;
+        icon.data[offset..offset + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn menu_hides_resume_while_tracking_is_on() {
+        assert_eq!(
+            menu_labels(false),
+            vec![
+                "Open Daymark",
+                "Pause 15 minutes",
+                "Pause 1 hour",
+                "Pause until resumed",
+                "Quit Daymark",
+            ]
+        );
+    }
+
+    #[test]
+    fn menu_offers_resume_only_while_paused() {
+        assert_eq!(
+            menu_labels(true),
+            vec![
+                "Open Daymark",
+                "Pause 15 minutes",
+                "Pause 1 hour",
+                "Pause until resumed",
+                "Resume",
+                "Quit Daymark",
+            ]
+        );
+    }
+
+    #[test]
+    fn pause_presets_map_to_seconds() {
+        assert_eq!(PausePreset::FifteenMinutes.seconds(), 900);
+        assert_eq!(PausePreset::OneHour.seconds(), 3600);
+        assert_eq!(PausePreset::UntilResumed.seconds(), 0);
+    }
+
+    #[test]
+    fn actions_map_to_the_existing_socket_commands() {
+        assert_eq!(TrayAction::Open.request(), TrayRequest::Show);
+        assert_eq!(
+            TrayAction::Pause(PausePreset::FifteenMinutes).request(),
+            TrayRequest::Pause(900)
+        );
+        assert_eq!(
+            TrayAction::Pause(PausePreset::OneHour).request(),
+            TrayRequest::Pause(3600)
+        );
+        assert_eq!(
+            TrayAction::Pause(PausePreset::UntilResumed).request(),
+            TrayRequest::Pause(0)
+        );
+        assert_eq!(TrayAction::Resume.request(), TrayRequest::Resume);
+        assert_eq!(TrayAction::Quit.request(), TrayRequest::Quit);
+    }
+
+    #[test]
+    fn an_expired_timed_pause_is_shown_as_resumed() {
+        let active = Settings {
+            paused: true,
+            paused_until: 1_100,
+            ..Settings::default()
+        };
+        assert_eq!(
+            TrayState::from_settings(&active, 1_000),
+            TrayState {
+                paused: true,
+                paused_until: 1_100,
+            }
+        );
+        assert_eq!(
+            TrayState::from_settings(&active, 1_100),
+            TrayState::default()
+        );
+
+        let open_ended = Settings {
+            paused: true,
+            paused_until: 0,
+            ..Settings::default()
+        };
+        assert!(TrayState::from_settings(&open_ended, 1_000).paused);
+    }
+
+    #[test]
+    fn the_poll_key_changes_at_minute_boundaries() {
+        let paused = TrayState {
+            paused: true,
+            paused_until: 1_900,
+        };
+        assert_eq!(paused.remaining_minutes(1_000), 15);
+        assert_eq!(paused.remaining_minutes(1_060), 14);
+        assert_eq!(TrayState::default().remaining_minutes(1_000), 0);
+    }
+
+    #[test]
+    fn tooltip_describes_the_pause() {
+        assert_eq!(tooltip_text(TrayState::default(), 1_000), "Tracking is on.");
+        assert_eq!(
+            tooltip_text(
+                TrayState {
+                    paused: true,
+                    paused_until: 0,
+                },
+                1_000,
+            ),
+            "Tracking is paused until you resume."
+        );
+        assert_eq!(
+            tooltip_text(
+                TrayState {
+                    paused: true,
+                    paused_until: 1_900,
+                },
+                1_000,
+            ),
+            "Tracking is paused — 15m remaining."
+        );
+    }
+
+    #[test]
+    fn icons_use_the_accent_and_a_distinct_paused_variant() {
+        let running = icon_for(false);
+        let paused = icon_for(true);
+        assert_eq!(running.width, ICON_SIZE);
+        assert_eq!(running.height, ICON_SIZE);
+        assert_eq!(running.data.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
+        assert_ne!(running.data, paused.data);
+        // Transparent outside the circular plate.
+        assert_eq!(pixel(&running, 0, 0), [0, 0, 0, 0]);
+        // The plate body carries the light accent or the paused neutral.
+        assert_eq!(
+            pixel(&running, 12, 2),
+            [255, ACCENT_RGB[0], ACCENT_RGB[1], ACCENT_RGB[2]]
+        );
+        assert_eq!(
+            pixel(&paused, 12, 2),
+            [255, PAUSED_RGB[0], PAUSED_RGB[1], PAUSED_RGB[2]]
+        );
+    }
+}

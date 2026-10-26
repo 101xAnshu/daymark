@@ -388,7 +388,7 @@ and falls back to the two-second poll if the watch cannot be created.
 
 ## Verification
 
-- `cargo test --lib`: **125 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **128 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
   across midnight, idle-gap exclusion, per-app totals, day metrics and timeline
   segmentation (empty days, gaps, overlaps, after-midnight and cross-midnight
@@ -411,8 +411,14 @@ and falls back to the two-second poll if the watch cannot be created.
   path, the audio/inhibitor presence cap (recent input, the two-hour cap, the
   latch, and lock/idle precedence), session presence persistence and the schema
   v4 migration, the weekly digest computation, notification payload and
-  preference round-trip, digest delivery and once-a-day gating, and local APT
-  policy/status parsing with numeric version comparison.
+  preference round-trip, digest delivery and once-a-day gating, local APT
+  policy/status parsing with numeric version comparison, and the pause
+  command encoding and socket-line mapping.
+- `cargo test --bin daymark`: **8 passed** — tray menu order and the
+  paused-only Resume item, pause preset to seconds and socket command mapping,
+  expired-pause display, the minute poll key, tooltip text, and the distinct
+  running/paused generated icons. These are pure tests and start no D-Bus
+  service.
 - The watch path was exercised with a real inotify watcher against temporary
   runtime directories. The live handoff from a GNOME companion focus change to
   the next tracker tick still needs a session with the companion loaded.

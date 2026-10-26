@@ -226,4 +226,31 @@ mod tests {
         drop(guard);
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn pause_commands_carry_their_length() {
+        let fifteen = pause_command(900);
+        assert_eq!(command_kind(fifteen), COMMAND_PAUSE);
+        assert_eq!(pause_seconds(fifteen), 900);
+        assert_eq!(command_kind(COMMAND_SHOW), COMMAND_SHOW);
+        assert_eq!(command_kind(COMMAND_QUIT), COMMAND_QUIT);
+        assert_eq!(command_kind(COMMAND_RESUME), COMMAND_RESUME);
+    }
+
+    #[test]
+    fn socket_lines_map_to_commands() {
+        assert_eq!(parse_command("show"), Some(COMMAND_SHOW));
+        assert_eq!(parse_command("quit"), Some(COMMAND_QUIT));
+        assert_eq!(parse_command("resume"), Some(COMMAND_RESUME));
+        assert_eq!(parse_command("pause"), Some(pause_command(0)));
+        assert_eq!(parse_command("pause 900"), Some(pause_command(900)));
+        assert_eq!(parse_command("pause 3600"), Some(pause_command(3600)));
+        assert_eq!(parse_command("pause 0"), Some(pause_command(0)));
+        assert_eq!(
+            parse_command("pause 999999999"),
+            Some(pause_command(MAX_PAUSE_SECONDS))
+        );
+        assert_eq!(parse_command("pause -5"), Some(pause_command(0)));
+        assert_eq!(parse_command("unknown"), None);
+    }
 }

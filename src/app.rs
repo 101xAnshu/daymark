@@ -1706,7 +1706,7 @@ fn pause_status_line(paused: bool, remaining: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::presence_note;
+    use super::{MAX_PAUSE_SECONDS, pause_deadline, presence_note};
 
     #[test]
     fn presence_note_is_quiet_and_hidden_at_zero() {
@@ -1714,5 +1714,18 @@ mod tests {
         assert_eq!(presence_note(-10), "");
         assert_eq!(presence_note(12 * 60), "12m with audio or a video playing");
         assert_eq!(presence_note(3600), "1h with audio or a video playing");
+    }
+
+    #[test]
+    fn pause_deadline_handles_presets_and_bounds() {
+        assert_eq!(pause_deadline(1_000, 0), 0, "until resumed");
+        assert_eq!(pause_deadline(1_000, -5), 0);
+        assert_eq!(pause_deadline(1_000, 900), 1_900);
+        assert_eq!(pause_deadline(1_000, 3_600), 4_600);
+        assert_eq!(
+            pause_deadline(1_000, i64::MAX),
+            1_000 + MAX_PAUSE_SECONDS,
+            "a malformed length is bounded"
+        );
     }
 }
