@@ -66,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         && state != "light-empty"
         && state != "empty-banner"
         && state != "empty-waiting"
+        && state != "rhythm-empty"
     {
         daymark::demo::seed(&store);
     }
@@ -91,7 +92,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if state == "dark" || state == "dark-settings" {
         settings.theme = ThemePref::Dark;
     }
-    if state == "light" || state == "light-settings" || state == "light-empty" {
+    if state == "light"
+        || state == "light-settings"
+        || state == "light-empty"
+        || state == "light-rhythm"
+    {
         settings.theme = ThemePref::Light;
     }
     let tracker = TrackerHandle::demo(settings.clone(), handle_status, detail);
@@ -113,6 +118,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut ctl = controller.borrow_mut();
         match state.as_str() {
             "history" => ctl.set_view_for_render(1),
+            "rhythm" => ctl.set_view_for_render(2),
+            "light-rhythm" => ctl.set_view_for_render(2),
+            "rhythm-empty" => ctl.set_view_for_render(2),
             "settings" | "dark-settings" | "light-settings" => ctl.open_settings_for_render(),
             "delete" => {
                 ctl.open_settings_for_render();

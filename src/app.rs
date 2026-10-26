@@ -18,7 +18,7 @@ use crate::logging;
 use crate::settings::{self, Settings, ThemePref};
 use crate::stats::{self, SessionRow};
 use crate::tracker::{self, LiveState, TrackerHandle, TrackingStatus};
-use crate::{AppRow, AppWindow, DayBar, HistoryRow, HourBar, Theme};
+use crate::{AppRow, AppWindow, DayBar, HeatCell, HeatRow, HistoryRow, HourBar, Theme};
 
 const HISTORY_DAYS: i32 = 14;
 /// Decoded icons are kept small; the UI shows them in a 28 pt tile.
@@ -388,6 +388,10 @@ impl AppController {
             self.ui
                 .set_hours(ModelRc::new(VecModel::from(Vec::<HourBar>::new())));
             self.ui
+                .set_heatmap(ModelRc::new(VecModel::from(Vec::<HeatRow>::new())));
+            self.ui.set_heatmap_total("".into());
+            self.ui.set_has_heatmap(false);
+            self.ui
                 .set_history(ModelRc::new(VecModel::from(Vec::<HistoryRow>::new())));
             self.last_refresh = Instant::now();
             self.force_refresh = false;
@@ -490,6 +494,46 @@ impl AppController {
             .into(),
         );
         self.ui.set_week(ModelRc::new(VecModel::from(week_rows)));
+
+        // Rhythm: the same seven days, split into local hours. The intensity is
+        // relative to the busiest hour in the window, so quiet weeks still show
+        // their shape instead of going flat.
+        let heatmap_days = stats::hourly_ending_at(&rows, day, 7);
+        let heat_max = heatmap_days
+            .iter()
+            .flat_map(|(_, hourly)| hourly.iter())
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        let heatmap_rows: Vec<HeatRow> = heatmap_days
+            .iter()
+            .map(|(d, hourly)| {
+                let total: i64 = hourly.iter().sum();
+                let cells: Vec<HeatCell> = hourly
+                    .iter()
+                    .map(|seconds| HeatCell {
+                        ratio: (*seconds as f32 / heat_max as f32).clamp(0.0, 1.0),
+                    })
+                    .collect();
+                HeatRow {
+                    label: d.weekday_short().into(),
+                    total: date::format_compact(total).into(),
+                    cells: ModelRc::new(VecModel::from(cells)),
+                }
+            })
+            .collect();
+        self.ui
+            .set_heatmap(ModelRc::new(VecModel::from(heatmap_rows)));
+        self.ui.set_heatmap_total(
+            if week_sum > 0 {
+                date::format_duration(week_sum)
+            } else {
+                String::new()
+            }
+            .into(),
+        );
+        self.ui.set_has_heatmap(week_sum > 0);
 
         // Application rows, including the current live interval.
         let total_apps = day_agg.apps.len();
@@ -812,7 +856,7 @@ impl AppController {
             let c = controller.clone();
             controller.borrow().ui.on_set_view(move |view| {
                 let mut ctl = c.borrow_mut();
-                ctl.view = if view == 1 { 1 } else { 0 };
+                ctl.view = view.clamp(0, 2);
                 ctl.force_refresh = true;
                 ctl.refresh();
             });

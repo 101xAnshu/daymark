@@ -25,6 +25,16 @@ export struct HourBar {
     ratio: float,
 }
 
+export struct HeatCell {
+    ratio: float,
+}
+
+export struct HeatRow {
+    label: string,
+    total: string,
+    cells: [HeatCell],
+}
+
 export struct HistoryRow {
     label: string,
     date: string,
@@ -48,7 +58,7 @@ export component AppWindow inherits Window {
     forward-focus: key-root;
 
     // --- Data -------------------------------------------------------------
-    in property <int> view: 0; // 0 = day, 1 = history
+    in property <int> view: 0; // 0 = day, 1 = history, 2 = rhythm
     in property <int> selected-offset: 0;
     in property <string> date-kicker: "";
     in property <string> total-text: "0m";
@@ -62,6 +72,9 @@ export component AppWindow inherits Window {
     in property <string> apps-caption: "";
     in property <string> peak-text: "";
     in property <[HourBar]> hours: [];
+    in property <[HeatRow]> heatmap: [];
+    in property <string> heatmap-total: "";
+    in property <bool> has-heatmap: false;
     in property <string> history-total: "0m";
     in property <string> history-summary: "";
     in property <[HistoryRow]> history: [];
@@ -178,6 +191,10 @@ export component AppWindow inherits Window {
             }
             if (event.modifiers.control && event.text == "2") {
                 root.set-view(1);
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "3") {
+                root.set-view(2);
                 return accept;
             }
             if (event.text == "\u{1b}") {
@@ -311,7 +328,7 @@ export component AppWindow inherits Window {
 
                     // Segmented view control
                     Rectangle {
-                        width: 136px;
+                        width: 204px;
                         height: 32px;
                         border-radius: 9px;
                         background: Theme.surface-muted;
@@ -350,6 +367,21 @@ export component AppWindow inherits Window {
                                     vertical-alignment: center;
                                 }
                                 TouchArea { mouse-cursor: pointer; clicked => { key-root.focus(); root.set-view(1); } }
+                            }
+                            rhythm-tab := Rectangle {
+                                horizontal-stretch: 1;
+                                border-radius: 6px;
+                                background: root.view == 2 ? Theme.surface : transparent;
+                                animate background { duration: 140ms; }
+                                Text {
+                                    text: "Rhythm";
+                                    font-size: Theme.small-size;
+                                    font-weight: root.view == 2 ? 600 : 500;
+                                    color: root.view == 2 ? Theme.text : Theme.text-secondary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                TouchArea { mouse-cursor: pointer; clicked => { key-root.focus(); root.set-view(2); } }
                             }
                         }
                     }
@@ -1104,6 +1136,150 @@ export component AppWindow inherits Window {
                                             clicked => { key-root.focus(); root.select-day(row.offset); }
                                         }
                                     }
+                            }
+                        }
+
+                        if (root.view == 2) : VerticalLayout {
+                            // ---- Rhythm view ----
+                            Text {
+                                text: "RHYTHM";
+                                font-size: Theme.micro-size;
+                                font-weight: 600;
+                                color: Theme.text-secondary;
+                                letter-spacing: 1.1px;
+                            }
+                            Rectangle { height: 6px; background: transparent; }
+                            if (root.has-heatmap) : Text {
+                                text: root.heatmap-total;
+                                font-size: Theme.hero-secondary-size;
+                                font-weight: 600;
+                                color: Theme.text;
+                                letter-spacing: -1.1px;
+                                height: 60px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.week-label + ", hour by hour. Each row is a day; darker means more time.";
+                                font-size: Theme.body-size;
+                                color: Theme.text-secondary;
+                            }
+                            Rectangle { height: 28px; background: transparent; }
+
+                            if (!root.has-heatmap) : VerticalLayout {
+                                VerticalLayout {
+                                    alignment: center;
+                                    padding-top: 40px;
+                                    spacing: 10px;
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        EmptyMark { }
+                                    }
+                                    Text {
+                                        text: "No rhythm yet";
+                                        font-size: 16px;
+                                        font-weight: 600;
+                                        color: Theme.text;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Days you use your computer will collect here.";
+                                        font-size: Theme.body-size;
+                                        color: Theme.text-secondary;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+
+                            if (root.has-heatmap) : VerticalLayout {
+                                // Hour labels align with the 24 columns below.
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Rectangle { width: 84px; background: transparent; }
+                                    HorizontalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 2px;
+                                        for hour in 24:
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                height: 14px;
+                                                background: transparent;
+                                                Text {
+                                                    text: hour == 0 ? "12 AM" : hour == 6 ? "6 AM" : hour == 12 ? "12 PM" : hour == 18 ? "6 PM" : "";
+                                                    font-size: Theme.micro-size;
+                                                    color: Theme.text-tertiary;
+                                                    horizontal-alignment: left;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                    }
+                                    Rectangle { width: 60px; background: transparent; }
+                                }
+                                Rectangle { height: 6px; background: transparent; }
+
+                                for row in root.heatmap:
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            width: 84px;
+                                            text: row.label;
+                                            font-size: Theme.small-size;
+                                            color: Theme.text-secondary;
+                                            vertical-alignment: center;
+                                        }
+                                        HorizontalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 2px;
+                                            for cell in row.cells:
+                                                Rectangle {
+                                                    horizontal-stretch: 1;
+                                                    height: 20px;
+                                                    border-radius: 3px;
+                                                    background: cell.ratio > 0.001 ? Theme.accent : Theme.surface-muted;
+                                                    opacity: cell.ratio > 0.001 ? 0.14 + 0.86 * cell.ratio : 0.55;
+                                                }
+                                        }
+                                        Text {
+                                            width: 60px;
+                                            text: row.total;
+                                            font-size: Theme.micro-size;
+                                            color: Theme.text-tertiary;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Rectangle { height: 3px; background: transparent; }
+
+                                Rectangle { height: 16px; background: transparent; }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: "Less";
+                                        font-size: Theme.micro-size;
+                                        color: Theme.text-tertiary;
+                                        vertical-alignment: center;
+                                    }
+                                    for shade in [0.14, 0.35, 0.6, 1.0]:
+                                        Rectangle {
+                                            width: 18px;
+                                            height: 10px;
+                                            border-radius: 2px;
+                                            background: Theme.accent;
+                                            opacity: shade;
+                                        }
+                                    Text {
+                                        text: "More";
+                                        font-size: Theme.micro-size;
+                                        color: Theme.text-tertiary;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                                    Text {
+                                        text: "Rows are days, columns are hours.";
+                                        font-size: Theme.micro-size;
+                                        color: Theme.text-tertiary;
+                                        vertical-alignment: center;
+                                    }
+                                }
                             }
                         }
 
