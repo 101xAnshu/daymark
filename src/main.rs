@@ -1,13 +1,15 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use slint::ComponentHandle;
 
 use daymark::AppWindow;
 use daymark::app::AppController;
 use daymark::db::{self, Store};
+use daymark::diagnostics;
 use daymark::instance::{self, COMMAND_NONE, COMMAND_QUIT, InstanceGuard};
+use daymark::logging;
 use daymark::settings::{self, Settings};
 use daymark::tracker;
 
@@ -15,6 +17,7 @@ fn main() -> std::process::ExitCode {
     match real_main() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
+            logging::error("run", &e);
             eprintln!("daymark: {e}");
             std::process::ExitCode::FAILURE
         }
@@ -27,13 +30,23 @@ fn real_main() -> Result<(), String> {
         match arg.as_str() {
             "--background" | "--autostart" | "--hidden" => background = true,
             "--quit" => {
-                if !instance::request_quit() {
+                if instance::request_quit() {
+                    logging::info("quit_requested", "sent");
+                } else {
+                    logging::error("quit_requested", "no running instance");
                     eprintln!("daymark: no running instance");
                 }
                 return Ok(());
             }
             "--setup-tracking" => {
                 let caps = daymark::platform::install_extension()?;
+                logging::info(
+                    "extension_install",
+                    &format!(
+                        "enabled={} state_fresh={}",
+                        caps.extension_enabled, caps.state_fresh
+                    ),
+                );
                 println!(
                     "Daymark tracking extension installed (enabled: {}).",
                     caps.extension_enabled
@@ -45,6 +58,14 @@ fn real_main() -> Result<(), String> {
             }
             "--version" | "-V" => {
                 println!("Daymark {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--status" => {
+                println!("{}", diagnostics::status_output());
+                return Ok(());
+            }
+            "doctor" => {
+                print!("{}", diagnostics::doctor_output());
                 return Ok(());
             }
             "--help" | "-h" => {
@@ -62,6 +83,17 @@ fn real_main() -> Result<(), String> {
         None => return Ok(()),
     };
 
+    logging::init();
+    let started = Instant::now();
+    logging::info(
+        "started",
+        &format!(
+            "version={} background={}",
+            env!("CARGO_PKG_VERSION"),
+            background
+        ),
+    );
+
     // The interface reads through its own connection so the tracker never
     // blocks a chart update.
     let (ui_store, mut settings, store_error) = match Store::open_default() {
@@ -69,14 +101,25 @@ fn real_main() -> Result<(), String> {
             let settings = Settings::load(&store);
             (Some(store), settings, None)
         }
-        Err(e) => (None, Settings::default(), Some(e)),
+        Err(e) => {
+            logging::error("database", &e);
+            (None, Settings::default(), Some(e))
+        }
     };
+    if let Some(store) = &ui_store {
+        logging::info("database", &format!("sessions={}", store.session_count()));
+    }
 
     let autostart_error = daymark::platform::apply_autostart(settings.autostart).err();
+    if let Some(error) = &autostart_error {
+        logging::error("autostart", error);
+    }
     if autostart_error.is_some() {
         settings.autostart = daymark::platform::autostart_installed();
     }
-    let _ = std::fs::create_dir_all(db::runtime_dir());
+    if let Err(error) = std::fs::create_dir_all(db::runtime_dir()) {
+        logging::error("runtime_dir", &error.to_string());
+    }
     settings::write_extension_config(&db::runtime_dir(), settings.idle_seconds);
 
     // One-time cleanup: fold old fallback rows (wmclass:…) into their desktop
@@ -89,6 +132,7 @@ fn real_main() -> Result<(), String> {
         match Store::open_default() {
             Ok(write_store) => Some(tracker::spawn(write_store, settings.clone())),
             Err(e) => {
+                logging::error("tracking_database", &e);
                 eprintln!("daymark: tracking database unavailable: {e}");
                 None
             }
@@ -128,6 +172,10 @@ fn real_main() -> Result<(), String> {
                     if let Some(tracker) = &tracker {
                         tracker.shutdown();
                     }
+                    logging::info(
+                        "stopped",
+                        &format!("uptime_s={}", started.elapsed().as_secs()),
+                    );
                     drop(guard);
                     return Ok(());
                 }
@@ -180,6 +228,10 @@ fn real_main() -> Result<(), String> {
     if let Some(tracker) = controller.borrow().tracker_handle() {
         tracker.shutdown();
     }
+    logging::info(
+        "stopped",
+        &format!("uptime_s={}", started.elapsed().as_secs()),
+    );
     drop(guard);
     Ok(())
 }
@@ -188,13 +240,17 @@ fn print_help() {
     println!(
         "Daymark {}\n\
          A quiet screen time journal for GNOME.\n\n\
-         Usage: daymark [options]\n\n\
+         Usage: daymark [options]\n\
+                  daymark doctor\n\n\
          Options:\n\
            --background     start hidden and keep tracking (used at login)\n\
            --quit           stop the running instance\n\
            --setup-tracking install the GNOME companion extension\n\
+           --status         print one line of tracking state for scripts\n\
            --version        print the version\n\
            -h, --help       show this help\n\n\
+         Commands:\n\
+           doctor           read-only database, companion and log check\n\n\
          The window can be reopened from the application grid. Daymark keeps\n\
          tracking while hidden; quit it from Settings.",
         env!("CARGO_PKG_VERSION")
