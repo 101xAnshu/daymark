@@ -13,15 +13,17 @@ The product should be reliable, private, native, and easy to install and keep ru
   the first-run flow, and the corrected footprint claims.
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --lib`
   pass; the library has **69 tests**.
-- The local `.deb` builds and contains its expected files. The `.rpm` builds in a Fedora 42
-  container, but a local install test is blocked because this host's binary requires
-  `GLIBC_2.43`; the workflow builds on Ubuntu 22.04 for the 2.35 floor. The GitHub
-  workflows have not run yet, so the release artifacts still need one CI pass.
+- CI passes on Ubuntu 22.04: formatting, clippy, 69 tests, release build, `.deb` with
+  lintian, `.rpm`, shellcheck, and a Fedora 42 install smoke test. The tag-driven release
+  workflow has not run yet because no release tag exists.
+- The supported runtime floors are Ubuntu 24.04 (GNOME 46+) and Fedora 42 (GNOME 48+).
+  The `.deb` is built on Ubuntu 22.04 for the glibc 2.35 floor; 22.04 itself ships GNOME 42
+  and is not a supported runtime.
 - A 60 second headless run measures about 8 MB RSS, 0.00% CPU, and about 0.5 wakeups/s.
   After the window has been opened and closed, RSS is about 24 MB and the tracker still
   polls. The README states both states separately.
-- The repository is still private. It must be made public before the release so Actions,
-  Releases, and package links work on the free plan.
+- The repository is public. The release uses GitHub Actions, Releases, and package links on
+  the free plan.
 
 ## 1. Executive summary
 
@@ -46,9 +48,10 @@ The roadmap below made Daymark easy to install, trustworthy in daily use, and a 
 default for Ubuntu and Fedora. All six P0 items are now implemented; the scorecard records
 the starting point and the sections after it note what shipped.
 
-V1 is the six P0 items below. It targets Ubuntu 22.04 and newer on amd64 and Fedora 42 and
-newer on x86_64, ships through GitHub Releases, and stays title-free. The tray, site names, heatmap, digest, aliases, and
-rollup are post-V1 work.
+V1 is the six P0 items below. It targets Ubuntu 24.04 and newer on amd64 (GNOME 46+) and
+Fedora 42 and newer on x86_64 (GNOME 48+), is built on Ubuntu 22.04 for the glibc 2.35
+floor, ships through GitHub Releases, and stays title-free. The tray, site names, heatmap,
+digest, aliases, and rollup are post-V1 work.
 
 ## Commit policy
 
@@ -144,9 +147,11 @@ rotate daily in `$XDG_STATE_HOME/daymark/logs` and hold counts, timings, and err
 Before V1, `install.sh` was the only path. There was no .deb, no .rpm, no CI, and no release.
 
 V1 added a .deb built on Ubuntu 22.04 for the glibc floor, an .rpm for Fedora 42 and newer
-on x86_64, a tarball, and `SHA256SUMS`. A tag-driven workflow creates a draft release and
-runs `shellcheck`, `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test`. The
-workflow has not run yet, so the first CI pass is still required.
+on x86_64, a tarball, and `SHA256SUMS`. The supported runtime floors are Ubuntu 24.04
+(GNOME 46+) and Fedora 42 (GNOME 48+); Ubuntu 22.04 is only the build floor. A tag-driven
+workflow creates a draft release and runs `shellcheck`, `cargo fmt --check`,
+`cargo clippy -D warnings`, and `cargo test`. CI passes; the release workflow still needs a
+release tag.
 
 ### App identity and icons
 
@@ -186,7 +191,8 @@ and the README publishes headless and hidden-after-close numbers.
 ## 5. What to keep
 
 - Stock Ubuntu and Fedora GNOME. Support GNOME 45 to 50 on Wayland and Xorg without a
-  compositor-specific capture path.
+  compositor-specific capture path. Supported distro floors are Ubuntu 24.04 (GNOME 46)
+  and Fedora 42 (GNOME 48).
 - The privacy model. No window titles, no browser files, no URLs, and no network code.
 - The native UI. Slint with no WebView, no WebKitGTK or GTK runtime, and AccessKit roles.
 - The single binary. 8.5 MiB, no Node, no Chromium tree, and a simple package.
@@ -220,9 +226,10 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 ### P0: before the V1 release (implemented)
 
 1. Add the .deb, .rpm, and CI release pipeline. Build the .deb on Ubuntu 22.04 for amd64
-   and the .rpm for Fedora 42 and newer on x86_64. Produce a tarball fallback,
-   `SHA256SUMS`, and a draft release. Publish through GitHub Releases only. Add an APT
-   repository later. **Implemented; waiting for the first CI run.**
+   and the .rpm for Fedora 42 and newer on x86_64. The runtime floors are Ubuntu 24.04
+   (GNOME 46+) and Fedora 42 (GNOME 48+). Produce a tarball fallback, `SHA256SUMS`, and a
+   draft release. Publish through GitHub Releases only. Add an APT repository later.
+   **Implemented; CI passes.**
 2. Build the first-run setup. Ship the extension system-wide, enable it for the user,
    offer autostart, and explain the one re-login. Let `postinst` refresh desktop and icon
    caches only. It must not start a tracker as root. **Implemented.**
@@ -268,15 +275,16 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 
 ## 8. V1 release checklist
 
-Checked items were verified locally on `v1-release`. Unchecked items need the first CI run
-or a packaged-install test before the release.
+Checked items are verified locally and in CI. Unchecked items need a live packaged-install
+test or the tag-driven release run.
 
 - [x] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`
       pass.
-- [ ] The packages target Ubuntu 22.04 and newer on amd64 and Fedora 42 and newer on x86_64.
+- [x] The packages target Ubuntu 24.04 and newer on amd64 (GNOME 46+) and Fedora 42 and
+      newer on x86_64 (GNOME 48+), built on Ubuntu 22.04 for the glibc 2.35 floor.
 - [x] V1 uses GitHub Releases only. No APT repository is required.
 - [ ] The .deb builds on Ubuntu 22.04 and installs on 24.04 and 26.04.
-- [ ] The .rpm builds and installs on Fedora 42 or newer on x86_64.
+- [x] The .rpm builds and installs on Fedora 42 or newer on x86_64.
 - [ ] `dpkg -i` starts no root daemon. The first run enables the extension and autostart.
 - [ ] The extension installs and updates from `/usr/share/gnome-shell/extensions`.
 - [x] Timed pause and resume work. A reboot with pause active behaves as designed.
@@ -304,10 +312,10 @@ or a packaged-install test before the release.
 
 These choices are fixed for V1.
 
-1. The GitHub repository will be public before the V1 release. It is still private today.
+1. The GitHub repository is public.
 2. V1 includes all six P0 items.
-3. The .deb targets Ubuntu 22.04 and newer on amd64. The .rpm targets Fedora 42 and newer
-   on x86_64.
+3. The .deb targets Ubuntu 24.04 and newer on amd64 (GNOME 46+), built on Ubuntu 22.04 for
+   the glibc 2.35 floor. The .rpm targets Fedora 42 and newer on x86_64 (GNOME 48+).
 4. V1 ships through GitHub Releases only. The APT repository comes later.
 5. V1 stays title-free. Site names are not in V1.
 6. The tray ships in V2.

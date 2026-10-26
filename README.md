@@ -20,7 +20,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-aa5431?style=flat-square" alt="MIT licensed" />
-  <img src="https://img.shields.io/badge/GNOME-45--50-aa5431?style=flat-square" alt="GNOME 45 to 50" />
+  <img src="https://img.shields.io/badge/GNOME-46--50-aa5431?style=flat-square" alt="GNOME 46 to 50" />
   <img src="https://img.shields.io/badge/binary-8.5%20MiB-aa5431?style=flat-square" alt="8.5 MB stripped binary" />
   <img src="https://img.shields.io/badge/network-none-aa5431?style=flat-square" alt="No network access" />
 </p>
@@ -68,12 +68,16 @@ the process, including after you close it to the background. That costs about
 
 ## Install
 
-Daymark targets **Ubuntu 22.04+** and **Fedora 42+**, both with GNOME 45–50. It
-has been tested on Ubuntu 26.04 with GNOME Shell 50.1, and the packages are
-built for amd64/x86_64. The build includes both the Wayland and X11 window
-backends.
+Daymark targets **Ubuntu 24.04+** (GNOME 46+) and **Fedora 42+** (GNOME 48+).
+It has been tested on Ubuntu 26.04 with GNOME Shell 50.1, and the packages are
+built for amd64/x86_64. The `.deb` is built on Ubuntu 22.04 for the glibc 2.35
+floor; Ubuntu 22.04 itself is not a supported runtime because it ships GNOME 42.
+The build includes both the Wayland and X11 window backends.
 
 ### Ubuntu package
+
+Ubuntu 24.04 or newer with GNOME 46 or newer is required. Ubuntu 22.04 ships
+GNOME 42, which the companion does not support.
 
 Download `daymark_<version>_amd64.deb` from the latest release and install it:
 
@@ -83,7 +87,7 @@ sudo apt install ./daymark_0.1.1_amd64.deb
 
 ### Fedora package
 
-Fedora 42 or newer with GNOME 45–50 is required. Download
+Fedora 42 or newer with GNOME 48 or newer is required. Download
 `daymark-<version>-1.x86_64.rpm` from the latest release and install it:
 
 ```bash
