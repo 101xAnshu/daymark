@@ -34,7 +34,7 @@ impl Paths {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct OpenSession {
     app: String,
     started: i64,
@@ -483,4 +483,211 @@ pub fn doctor_output() -> String {
 
 pub fn status_output() -> String {
     status_line(&Paths::current(), date::unix_now())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::date::Day;
+    use crate::db::Store;
+    use crate::desktop::ResolvedApp;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "daymark-diagnostics-{tag}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn paths(&self) -> Paths {
+            Paths {
+                db: self.0.join("daymark.db"),
+                state: self.0.join("state.json"),
+                extension_dir: self.0.join("extension"),
+                autostart: self.0.join("autostart/daymark.desktop"),
+                logs: self.0.join("logs"),
+            }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn app() -> ResolvedApp {
+        ResolvedApp {
+            key: "org.example.Editor".into(),
+            name: "Example Editor".into(),
+            icon: None,
+            desktop_id: Some("org.example.Editor.desktop".into()),
+            wm_class: Some("Example Editor".into()),
+            matched: true,
+        }
+    }
+
+    fn seed_session(db_path: &Path, now: i64) {
+        let store = Store::open_at(db_path).unwrap();
+        let today = Day::from_timestamp(now);
+        let id = store.upsert_app(&app(), now).unwrap();
+        let closed = store.open_session(id, today.start_ts() + 60).unwrap();
+        store.close_session(closed, today.start_ts() + 120).unwrap();
+        store.open_session(id, today.start_ts() + 180).unwrap();
+    }
+
+    fn write_state(path: &Path, name: &str, away: bool, now: i64) {
+        let body = format!(
+            r#"{{"v":2,"seq":1,"stamp":{},"focus":{{"id":"org.example.Editor.desktop","name":"{name}"}},"away":{away},"away_since":0,"idle":{away},"locked":false}}"#,
+            now * 1000
+        );
+        fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn doctor_renders_every_field_from_a_temp_database() {
+        let dir = TempDir::new("doctor");
+        let paths = dir.paths();
+        let now = date::unix_now();
+        fs::create_dir_all(&paths.extension_dir).unwrap();
+        fs::write(
+            paths.extension_dir.join("metadata.json"),
+            r#"{"uuid":"daymark@daymark.app","version":2}"#,
+        )
+        .unwrap();
+        let store = Store::open_at(&paths.db).unwrap();
+        store.set_setting("retention_days", "90").unwrap();
+        crate::db::migrate_legacy_identities(&store);
+        drop(store);
+        seed_session(&paths.db, now);
+        write_state(&paths.state, "Example Editor", false, now);
+        fs::create_dir_all(paths.autostart.parent().unwrap()).unwrap();
+        fs::write(&paths.autostart, "[Desktop Entry]\n").unwrap();
+        fs::create_dir_all(&paths.logs).unwrap();
+        fs::write(
+            paths
+                .logs
+                .join(format!("daymark-{}.log", Day::from_timestamp(now).iso())),
+            "2026-10-26 14:00:00 level=ERROR event=save message=Could not save\n",
+        )
+        .unwrap();
+
+        let report = collect(&paths, now, false);
+        assert_eq!(report.db_error, None);
+        assert_eq!(report.schema_version, Some(2));
+        assert_eq!(report.rows_today, 2);
+        assert_eq!(report.open_session.as_ref().unwrap().app, "Example Editor");
+        assert!(report.state_present);
+        assert!(report.state_fresh);
+        assert_eq!(report.extension_version.as_deref(), Some("2"));
+        assert!(report.extension_installed);
+        assert!(!report.extension_enabled);
+        assert!(report.autostart_installed);
+        assert_eq!(report.retention_days, 90);
+        assert!(
+            report
+                .last_error
+                .as_deref()
+                .unwrap()
+                .ends_with("event=save message=Could not save")
+        );
+
+        let output = render(&report);
+        assert!(output.starts_with("Daymark doctor\n"));
+        assert!(output.contains(&format!("database: {}\n", paths.db.display())));
+        assert!(output.contains("\nschema version: 2\n"));
+        assert!(output.contains("\ndatabase size: "));
+        assert!(output.contains("\nWAL size: "));
+        assert!(output.contains("\nheartbeat age: "));
+        assert!(output.contains("\nextension state: fresh\n"));
+        assert!(output.contains("\nopen session: Example Editor (started "));
+        assert!(output.contains("\nrows recorded today: 2\n"));
+        assert!(output.contains("\nextension installed: yes\n"));
+        assert!(output.contains("\nextension enabled: no\n"));
+        assert!(output.contains("\nextension version: 2\n"));
+        assert!(output.contains("\nautostart installed: yes\n"));
+        assert!(output.contains("\nretention days: 90\n"));
+        assert!(
+            output
+                .contains("\nlast error: 2026-10-26 14:00:00 event=save message=Could not save\n")
+        );
+    }
+
+    #[test]
+    fn doctor_reports_a_missing_database_without_creating_it() {
+        let dir = TempDir::new("missing");
+        let paths = dir.paths();
+        let report = collect(&paths, date::unix_now(), false);
+        assert_eq!(report.db_error.as_deref(), Some("database not found"));
+        assert_eq!(report.schema_version, None);
+        assert_eq!(report.open_session, None);
+        assert_eq!(report.rows_today, 0);
+        assert!(!paths.db.exists());
+        let output = render(&report);
+        assert!(output.contains("\ndatabase error: database not found\n"));
+        assert!(output.contains("\nlast error: none\n"));
+    }
+
+    #[test]
+    fn status_reports_an_active_fresh_app() {
+        let dir = TempDir::new("status-active");
+        let paths = dir.paths();
+        let now = date::unix_now();
+        seed_session(&paths.db, now);
+        write_state(&paths.state, "Example Editor", false, now);
+        assert_eq!(
+            status_line(&paths, now),
+            "tracking=active pause=none app=\"Example Editor\""
+        );
+    }
+
+    #[test]
+    fn status_reports_a_timed_pause_and_its_deadline() {
+        let dir = TempDir::new("status-paused");
+        let paths = dir.paths();
+        let now = date::unix_now();
+        let until = now + 600;
+        {
+            let store = Store::open_at(&paths.db).unwrap();
+            store.set_setting("paused", "1").unwrap();
+            store
+                .set_setting("paused_until", &until.to_string())
+                .unwrap();
+        }
+        write_state(&paths.state, "Example Editor", false, now);
+        assert_eq!(
+            status_line(&paths, now),
+            format!("tracking=paused pause=until:{until} app=\"Example Editor\"")
+        );
+        // A deadline in the past is no longer a pause.
+        assert_eq!(
+            status_line(&paths, until + 1),
+            "tracking=active pause=none app=\"Example Editor\""
+        );
+    }
+
+    #[test]
+    fn status_marks_an_old_state_file_as_stale_and_omits_the_app() {
+        let dir = TempDir::new("status-stale");
+        let paths = dir.paths();
+        let now = date::unix_now();
+        {
+            let _store = Store::open_at(&paths.db).unwrap();
+        }
+        write_state(&paths.state, "Example Editor", false, now);
+        let old = std::time::SystemTime::now() - Duration::from_secs(120);
+        let file = fs::File::options().write(true).open(&paths.state).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        assert_eq!(status_line(&paths, now), "tracking=stale pause=none");
+    }
 }
