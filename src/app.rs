@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,10 @@ use slint::{ComponentHandle, Image, ModelRc, SharedPixelBuffer, VecModel};
 
 use crate::date::{self, Day};
 use crate::db::{self, AppInfo, Store};
-use crate::instance::{COMMAND_NONE, COMMAND_QUIT, COMMAND_SHOW};
+use crate::instance::{
+    COMMAND_NONE, COMMAND_PAUSE, COMMAND_QUIT, COMMAND_RESUME, COMMAND_SHOW, MAX_PAUSE_SECONDS,
+    command_kind, pause_seconds,
+};
 use crate::logging;
 use crate::settings::{self, Settings, ThemePref};
 use crate::stats::{self, RollupTotal, SessionRow};
@@ -250,7 +253,7 @@ pub struct AppController {
     theme_watch_live: bool,
     last_theme_poll: Instant,
     restore_maximized: bool,
-    command: Option<Arc<AtomicU8>>,
+    command: Option<Arc<AtomicU64>>,
     /// Set while the window is hidden to the background. Slint's own
     /// `is_visible()` stays true for the `hide_without_quitting` backport, so
     /// the controller tracks the lifecycle itself.
@@ -268,7 +271,7 @@ impl AppController {
         store: Option<Store>,
         tracker: Option<TrackerHandle>,
         settings: Settings,
-        command: Option<Arc<AtomicU8>>,
+        command: Option<Arc<AtomicU64>>,
     ) -> Rc<RefCell<Self>> {
         let dark = match settings.theme {
             ThemePref::Light => false,
@@ -1102,10 +1105,7 @@ impl AppController {
             let c = controller.clone();
             controller.borrow().ui.on_resume_tracking(move || {
                 let mut ctl = c.borrow_mut();
-                ctl.settings.paused = false;
-                ctl.settings.paused_until = 0;
-                ctl.save_settings();
-                ctl.force_refresh = true;
+                ctl.apply_resume();
                 ctl.refresh();
             });
         }
@@ -1222,14 +1222,7 @@ impl AppController {
             // `seconds` is the pause length; 0 means "until resumed".
             controller.borrow().ui.on_pause_for(move |seconds| {
                 let mut ctl = c.borrow_mut();
-                ctl.settings.paused = true;
-                ctl.settings.paused_until = if seconds > 0 {
-                    crate::date::unix_now() + seconds as i64
-                } else {
-                    0
-                };
-                ctl.save_settings();
-                ctl.force_refresh = true;
+                ctl.apply_pause(seconds as i64);
                 ctl.refresh();
             });
         }
@@ -1328,6 +1321,23 @@ impl AppController {
         }
     }
 
+    /// Apply a pause from the tray or the settings sheet. Zero seconds means
+    /// "until resumed". The tracker is updated through the normal settings
+    /// path so it stops counting immediately.
+    fn apply_pause(&mut self, seconds: i64) {
+        self.settings.paused = true;
+        self.settings.paused_until = pause_deadline(crate::date::unix_now(), seconds);
+        self.save_settings();
+        self.force_refresh = true;
+    }
+
+    fn apply_resume(&mut self) {
+        self.settings.paused = false;
+        self.settings.paused_until = 0;
+        self.save_settings();
+        self.force_refresh = true;
+    }
+
     fn save_settings(&mut self) {
         if let Some(store) = &self.store {
             if let Err(e) = self.settings.save(store) {
@@ -1384,7 +1394,8 @@ impl AppController {
     /// Called by the UI timer. Only refreshes when something visible changed.
     pub fn tick(&mut self) {
         if let Some(command) = &self.command {
-            match command.swap(COMMAND_NONE, Ordering::SeqCst) {
+            let value = command.swap(COMMAND_NONE, Ordering::SeqCst);
+            match command_kind(value) {
                 COMMAND_SHOW => {
                     self.force_refresh = true;
                     self.last_theme_poll = Instant::now() - Duration::from_secs(30);
@@ -1401,6 +1412,12 @@ impl AppController {
                 COMMAND_QUIT => {
                     self.quit();
                     return;
+                }
+                COMMAND_PAUSE => {
+                    self.apply_pause(pause_seconds(value));
+                }
+                COMMAND_RESUME => {
+                    self.apply_resume();
                 }
                 _ => {}
             }
@@ -1664,6 +1681,18 @@ fn presence_note(seconds: i64) -> String {
     )
 }
 
+/// Deadline for a pause starting now. Zero length means "until resumed" and
+/// therefore has no deadline. Bounded like the socket parser so a malformed
+/// command cannot arm a pause far in the future.
+fn pause_deadline(now: i64, seconds: i64) -> i64 {
+    let seconds = seconds.clamp(0, MAX_PAUSE_SECONDS);
+    if seconds > 0 {
+        now.saturating_add(seconds)
+    } else {
+        0
+    }
+}
+
 /// One-line description of the pause state for the settings panel and the
 /// background-resume path: empty while tracking runs.
 fn pause_status_line(paused: bool, remaining: i64) -> String {
@@ -1679,7 +1708,7 @@ fn pause_status_line(paused: bool, remaining: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::presence_note;
+    use super::{MAX_PAUSE_SECONDS, pause_deadline, presence_note};
 
     #[test]
     fn presence_note_is_quiet_and_hidden_at_zero() {
@@ -1687,5 +1716,18 @@ mod tests {
         assert_eq!(presence_note(-10), "");
         assert_eq!(presence_note(12 * 60), "12m with audio or a video playing");
         assert_eq!(presence_note(3600), "1h with audio or a video playing");
+    }
+
+    #[test]
+    fn pause_deadline_handles_presets_and_bounds() {
+        assert_eq!(pause_deadline(1_000, 0), 0, "until resumed");
+        assert_eq!(pause_deadline(1_000, -5), 0);
+        assert_eq!(pause_deadline(1_000, 900), 1_900);
+        assert_eq!(pause_deadline(1_000, 3_600), 4_600);
+        assert_eq!(
+            pause_deadline(1_000, i64::MAX),
+            1_000 + MAX_PAUSE_SECONDS,
+            "a malformed length is bounded"
+        );
     }
 }

@@ -189,7 +189,7 @@ Maintainer: ${MAINTAINER}
 Section: utils
 Priority: optional
 Depends: libc6 (>= 2.35), libgcc-s1
-Recommends: gnome-shell (>= 46)
+Recommends: gnome-shell (>= 46), gnome-shell-extension-appindicator
 Description: quiet local screen time journal for GNOME
  Daymark records how long each application is used and presents a calm
  daily view, the shape of the week, and fourteen days of history.
