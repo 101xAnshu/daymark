@@ -21,7 +21,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-aa5431?style=flat-square" alt="MIT licensed" />
   <img src="https://img.shields.io/badge/GNOME-45--50-aa5431?style=flat-square" alt="GNOME 45 to 50" />
-  <img src="https://img.shields.io/badge/binary-8.4%20MiB-aa5431?style=flat-square" alt="8.4 MB stripped binary" />
+  <img src="https://img.shields.io/badge/binary-8.5%20MiB-aa5431?style=flat-square" alt="8.5 MB stripped binary" />
   <img src="https://img.shields.io/badge/network-none-aa5431?style=flat-square" alt="No network access" />
 </p>
 
@@ -41,7 +41,7 @@ went, and how that compares with your own history. It asks for no account, opens
 no browser engine, makes no network requests, and keeps everything in one small
 SQLite file on the machine in front of you.
 
-The window is a real native app: 8.4 MiB on disk. Started at login with
+The window is a real native app: 8.5 MiB on disk. Started at login with
 `--background`, it opens no window and creates no Slint platform or event loop:
 about 8 MB of memory, 0% idle CPU, and roughly one wakeup every two seconds for
 the tracker. Once you open the window, the interface stays alive for the rest of
@@ -312,8 +312,9 @@ process is low-idle, not zero-wakeup.
   desktop entry and the companion reports `daymark.desktop` instead of an
   "Unknown" window-backed app.
 - `--background` created no window and no Slint event loop. A 60-second run of
-  `scripts/measure.sh` with temporary XDG directories measured **8.21 MiB RSS,
-  0.00% CPU, 0.48 wakeups/s and 3 threads**. A second launch shows the running
+  `scripts/measure.sh` with temporary XDG directories measured **7.9 MiB RSS,
+  0.00% CPU, 0.48 wakeups/s and 3 threads**; repeated runs ranged from 7.4 to
+  8.2 MiB. A second launch shows the running
   instance; `--quit` stops it cleanly.
 - Closing the window leaves it unmapped, stops the 700 ms refresh timer, and
   still handles Show and Quit over the local socket. In the same live session
@@ -339,10 +340,10 @@ Measured on Ubuntu 26.04, GNOME Shell 50.1, Wayland, x86_64, release build:
 
 | Item | Result |
 | --- | ---: |
-| Stripped executable | **8,822,768 bytes (8.41 MiB)** |
+| Stripped executable | **8,936,816 bytes (8.52 MiB)** |
 | Installed application files (binary, icon, entries, extension) | ≈ 8.9 MB |
 | Fresh database | 4 KB |
-| Headless RSS (`--background`) | ≈ 8.2 MB |
+| Headless RSS (`--background`) | 7.4–8.2 MB across runs (≈ 8 MB) |
 | Headless CPU, 60 s sample | 0.00% |
 | Headless wakeups | 0.48/s (the tracker poll) |
 | Visible RSS | ≈ 23.8 MB |
