@@ -39,6 +39,9 @@ pub struct Settings {
     /// Seconds without input before tracking pauses. Clamped to 30..=3600.
     pub idle_seconds: i64,
     pub paused: bool,
+    /// Unix timestamp (seconds) when a timed pause ends. 0 means the pause
+    /// has no deadline ("until resumed") or tracking is not paused.
+    pub paused_until: i64,
     pub autostart: bool,
     /// 0 means keep everything.
     pub retention_days: i64,
@@ -50,6 +53,7 @@ impl Default for Settings {
         Self {
             idle_seconds: 300,
             paused: false,
+            paused_until: 0,
             autostart: true,
             retention_days: 365,
             theme: ThemePref::System,
@@ -69,6 +73,13 @@ impl Settings {
         if let Some(v) = store.get_setting("paused") {
             s.paused = v == "1" || v.eq_ignore_ascii_case("true");
         }
+        if let Some(v) = store
+            .get_setting("paused_until")
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            s.paused_until = v.max(0);
+        }
+        s.resolve_pause_at_start(store);
         if let Some(v) = store.get_setting("autostart") {
             s.autostart = v != "0" && !v.eq_ignore_ascii_case("false");
         }
@@ -84,10 +95,39 @@ impl Settings {
         s
     }
 
+    /// A pause never silently outlives a restart: an open-ended pause
+    /// (including the old `paused=1` format without a deadline) resumes at
+    /// the next app start, and so does a timed pause whose deadline passed
+    /// while the app was off. Only a timed pause that has not expired yet
+    /// stays paused. The cleared state is written back immediately so the
+    /// next start agrees.
+    fn resolve_pause_at_start(&mut self, store: &Store) {
+        if !self.paused {
+            self.paused_until = 0;
+            return;
+        }
+        let expired = self.paused_until > 0 && crate::date::unix_now() >= self.paused_until;
+        if self.paused_until == 0 || expired {
+            self.paused = false;
+            self.paused_until = 0;
+            let _ = store.set_setting("paused", "0");
+            let _ = store.set_setting("paused_until", "0");
+        }
+    }
+
+    /// True when a timed pause has reached its deadline and tracking should
+    /// resume on its own.
+    pub fn pause_expired(&self, now: i64) -> bool {
+        self.paused && self.paused_until > 0 && now >= self.paused_until
+    }
+
     pub fn save(&self, store: &Store) -> Result<(), String> {
         store
             .set_setting("idle_seconds", &self.idle_seconds.to_string())
             .and_then(|_| store.set_setting("paused", if self.paused { "1" } else { "0" }))
+            .and_then(|_| {
+                store.set_setting("paused_until", &self.paused_until.to_string())
+            })
             .and_then(|_| store.set_setting("autostart", if self.autostart { "1" } else { "0" }))
             .and_then(|_| store.set_setting("retention_days", &self.retention_days.to_string()))
             .and_then(|_| store.set_setting("theme", self.theme.as_str()))
