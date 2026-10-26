@@ -41,9 +41,12 @@ went, and how that compares with your own history. It asks for no account, opens
 no browser engine, makes no network requests, and keeps everything in one small
 SQLite file on the machine in front of you.
 
-The window is a real native app: 8.4 MiB on disk, about 8 MB of memory while
-hidden in the background, no idle CPU, and no wakeups until there is something
-to do.
+The window is a real native app: 8.4 MiB on disk. Started at login with
+`--background`, it opens no window and creates no Slint platform or event loop:
+about 8 MB of memory, 0% idle CPU, and roughly one wakeup every two seconds for
+the tracker. Once you open the window, the interface stays alive for the rest of
+the process, including after you close it to the background. That costs about
+24 MB and keeps the tracker poll, so it is not the headless footprint.
 
 ## What you get
 
@@ -53,7 +56,7 @@ to do.
 | A per-app breakdown with real icons and quiet time bars | Window titles, keystrokes, clipboard data or screenshots |
 | Fourteen days of history at a glance | Cloud sync, analytics, telemetry or any network code |
 | System light/dark that follows GNOME live | A WebView, Electron or Node runtime |
-| A small GNOME companion that publishes one JSON file | A background process that thinks while you are idle |
+| A small GNOME companion that publishes one JSON file | A background process that animates or redraws while you are idle |
 
 ## Screenshots
 
@@ -123,9 +126,14 @@ cd daymark-0.1.1
 ./install.sh --no-build
 ```
 
-**The first install needs one sign-out and sign-in.** GNOME on Wayland only scans
-for new Shell extensions at login; Daymark's setup sheet explains this and the
-extension begins reporting on the next login.
+**The first install needs one sign-out and sign-in, and each companion update
+needs one too.** GNOME on Wayland loads extension code only when the Shell
+session starts. It does not pick up a newly installed or newly replaced
+`extension.js` while that session is running, so the setup sheet asks for one
+sign-out/sign-in after installation. A package update that changes the companion
+takes effect at the next login for the same reason. Disabling and re-enabling
+the extension, or restarting Daymark itself, does not reload it on Wayland.
+Recorded history and settings are unaffected; tracking begins after that login.
 
 ### First run
 
@@ -156,7 +164,9 @@ To remove a source or archive install:
 - `T` returns to today; `Ctrl+1` / `Ctrl+2` switch between Day and History.
 - `Ctrl+,` opens Settings. `Ctrl+W` hides the window. `Ctrl+Q` quits.
 - The ✕ control (or Alt+F4) hides Daymark and keeps tracking in the background;
-  **Quit Daymark** in Settings really stops it.
+  **Quit Daymark** in Settings really stops it. After the first open the process
+  keeps the interface in memory while hidden; `--background` at login is the
+  smaller headless mode.
 - Search filters the application list by name. Clicking anywhere outside the
   field releases focus.
 - Settings holds the idle timeout, retention, appearance, autostart, pause
@@ -190,7 +200,9 @@ tracking=active pause=none app="Example Editor"
 heartbeat age, whether the companion state file is fresh, the open session and
 today's row count, whether the companion is installed, enabled and which
 version its `metadata.json` declares, whether autostart is installed, the
-retention setting, and the last error in the log. It opens the database in
+retention setting, and the last error in the log. The installed/version fields
+follow the copy Daymark actually enables: the packaged system-wide companion
+when it exists, otherwise the user-level one. `doctor` opens the database in
 read-only mode: it never creates, migrates, recovers or writes it.
 
 Logs are written under `$XDG_STATE_HOME/daymark/logs`, falling back to
@@ -277,29 +289,38 @@ desktop session's Wayland/X11 libraries. The same build runs on Xorg; the old
 
 `--background` is genuinely invisible: no window, no Slint platform and no event
 loop exist until the interface is requested. The UI is created lazily when you
-open Daymark from the application grid.
+open Daymark from the application grid. The tracker still polls the companion
+every two seconds and writes a heartbeat every 30 seconds, so the headless
+process is low-idle, not zero-wakeup.
 
 ## Verification
 
-- `cargo test --lib`: **58 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **69 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, idle-gap exclusion, per-app totals,
   averages, JSON parsing (including the seconds/milliseconds compatibility
   path), desktop-entry parsing (quoted `Exec`, `NoDisplay`, hidden entries),
   shell-window filtering, SQLite persistence, legacy-row migration, corruption
   recovery, crash recovery, at-most-one-open-session, pruning, settings, single
   instance, tracker focus/pause/idle behavior, log rotation, extension copy
-  selection (system-wide preferred, user folder as fallback), the first-run
-  decision, autostart-entry consent parsing (a deliberately disabled entry is
-  left alone), and read-only
-  doctor/status formatting against a temporary database with its write
-  connection still open.
+  selection (system-wide preferred, user folder as fallback), doctor reading the
+  packaged system-wide companion and its version, the first-run decision,
+  autostart-entry consent parsing (a deliberately disabled entry is left alone),
+  and read-only doctor/status formatting against a temporary database with its
+  write connection still open.
 - The release binary was run on a live GNOME 50.1 Wayland session. The window
   reaches GNOME with app id/WM class `daymark`, so the shell matches it to the
   desktop entry and the companion reports `daymark.desktop` instead of an
   "Unknown" window-backed app.
-- `--background` created no window and no Slint event loop: **8.2 MB RSS, 0% CPU
-  and 0 wakeups/s** over a 20-second sample. A second launch shows the headless
+- `--background` created no window and no Slint event loop. A 60-second run of
+  `scripts/measure.sh` with temporary XDG directories measured **8.21 MiB RSS,
+  0.00% CPU, 0.48 wakeups/s and 3 threads**. A second launch shows the running
   instance; `--quit` stops it cleanly.
+- Closing the window leaves it unmapped, stops the 700 ms refresh timer, and
+  still handles Show and Quit over the local socket. In the same live session
+  (X11 backend on XWayland; native Wayland destroys the hidden surface instead),
+  the hidden process held 23.8 MiB RSS at 0.00% CPU and 2.5 wakeups/s, down from
+  3.9/s with the window open. The remaining wakeups are the tracker poll and
+  event-loop housekeeping, so hidden-after-close is not a zero-wakeup state.
 - The one-time migration ran on the live database (a backup copy was taken
   first): the `gjs` row and its sessions were removed and the
   `wm_class:com.t3tools.t3code` fallback row was merged into
@@ -321,27 +342,37 @@ Measured on Ubuntu 26.04, GNOME Shell 50.1, Wayland, x86_64, release build:
 | Stripped executable | **8,822,768 bytes (8.41 MiB)** |
 | Installed application files (binary, icon, entries, extension) | ≈ 8.9 MB |
 | Fresh database | 4 KB |
-| Hidden RSS | ≈ 8.2 MB |
-| Hidden CPU, 20 s sample | 0.0% (0 ticks at 100 Hz) |
-| Hidden wakeups | 0/s (blocked on IPC) |
-| Visible RSS | ≈ 27 MB |
-| Visible CPU, 10 s sample | 0.0% |
-| Visible wakeups | ≈ 1.4/s |
-| Threads | 3 hidden / 7 visible |
+| Headless RSS (`--background`) | ≈ 8.2 MB |
+| Headless CPU, 60 s sample | 0.00% |
+| Headless wakeups | 0.48/s (the tracker poll) |
+| Visible RSS | ≈ 23.8 MB |
+| Visible CPU, 20 s sample | 0.00% |
+| Visible wakeups | ≈ 3.9/s |
+| Hidden-after-close RSS | ≈ 23.8 MB |
+| Hidden-after-close CPU | 0.00% (0 ticks at 100 Hz) |
+| Hidden-after-close wakeups | ≈ 2.5/s |
+| Threads | 3 headless / 10 with the interface |
 
-CPU is from `/proc/<pid>/stat` (`utime+stime` ticks / 100 Hz / interval); RSS from
-`/proc/<pid>/status`; samples were taken after a 4 second settle. Wakeups are
-voluntary context switches per second. Dynamic dependencies: `libc`, `libm`,
-`libgcc_s`; the GNOME/Wayland libraries are already part of the session. SQLite
-is compiled in. The binary sits below the 10 MB budget; that budget paid for SVG
-icons, AccessKit accessibility and the X11 backend.
+Headless numbers come from `scripts/measure.sh --seconds 60`, which starts the
+release binary with temporary XDG directories and asks it to quit over its own
+socket. The other rows were sampled the same way on a live session with the
+X11 backend on XWayland; native Wayland destroys the hidden surface instead, so
+its memory can be lower while the tracker poll remains. Wakeups are total
+voluntary context switches per second across every thread, not just the main
+thread. CPU is from `/proc/<pid>/stat` (`utime+stime` ticks / 100 Hz / interval);
+RSS is from `/proc/<pid>/status`; samples were taken after a 5 second settle.
+Dynamic dependencies: `libc`, `libm`, `libgcc_s`; the GNOME/Wayland libraries
+are already part of the session. SQLite is compiled in. The binary sits below
+the 10 MB budget; that budget paid for SVG icons, AccessKit accessibility and
+the X11 backend.
 
 ## Known limitations
 
-- **Wayland focus tracking needs the GNOME companion and one logout/login after
-  installation.** This is a GNOME extension-loading rule, not a Daymark
-  workaround; the app says so in its setup flow. Updating an already-loaded
-  extension also needs a re-login before GNOME executes the new file.
+- **Wayland focus tracking needs the GNOME companion, plus one logout/login
+  after installing it and after each companion update.** GNOME on Wayland loads
+  extension JavaScript once per Shell session and does not reload a replaced
+  `extension.js`. This is a GNOME rule, not a Daymark workaround; the setup flow
+  says so, and tracking begins after that login.
 - GNOME Shell surfaces are filtered, but a future Shell version could introduce
   a new internal surface type; the app keeps a deny-list as a second line of
   defence.
