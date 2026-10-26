@@ -330,13 +330,14 @@ created.
 
 ## Verification
 
-- `cargo test --lib`: **80 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **84 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
   across midnight, idle-gap exclusion, per-app totals,
   averages, JSON parsing (including the seconds/milliseconds compatibility
   path), desktop-entry parsing (quoted `Exec`, `NoDisplay`, hidden entries),
   shell-window filtering, SQLite persistence, legacy-row migration, corruption
-  recovery, crash recovery, at-most-one-open-session, pruning, settings, single
+  recovery, crash recovery, at-most-one-open-session, pruning, daily rollup
+  preservation, repeated-prune safety, cross-midnight rollup, settings, single
   instance, tracker focus/pause/idle behavior, log rotation, extension copy
   selection (system-wide preferred, user folder as fallback), doctor reading the
   packaged system-wide companion and its version, the first-run decision,
@@ -354,7 +355,7 @@ created.
   desktop entry and the companion reports `daymark.desktop` instead of an
   "Unknown" window-backed app.
 - `--background` created no window and no Slint event loop. A 60-second run of
-  `scripts/measure.sh` with temporary XDG directories measured **8.95 MiB RSS,
+  `scripts/measure.sh` with temporary XDG directories measured **8.3–9.0 MiB RSS,
   0.00% CPU, 0.03 wakeups/s and 3 threads**; the single periodic wake is the
   30-second watch safety check. A second launch shows the running instance;
   `--quit` stops it cleanly.
@@ -386,10 +387,10 @@ sampled before it, so their tracker poll is now event-driven.
 
 | Item | Result |
 | --- | ---: |
-| Stripped executable | **9,131,376 bytes (8.71 MiB)** |
+| Stripped executable | **9,140,976 bytes (8.72 MiB)** |
 | Installed application files (binary, icon, entries, extension) | ≈ 9.2 MB |
 | Fresh database | 4 KB |
-| Headless RSS (`--background`) | 8.95 MiB (one 60 s run) |
+| Headless RSS (`--background`) | 8.3–9.0 MiB across runs (≈ 8 MB) |
 | Headless CPU, 60 s sample | 0.00% |
 | Headless wakeups | 0.03/s (the 30-second safety check) |
 | Visible RSS | ≈ 23.8 MB |
@@ -397,7 +398,7 @@ sampled before it, so their tracker poll is now event-driven.
 | Visible wakeups | ≈ 3.9/s |
 | Hidden-after-close RSS | ≈ 23.8 MB |
 | Hidden-after-close CPU | 0.00% (0 ticks at 100 Hz) |
-| Hidden-after-close wakeups | ≈ 2.5/s |
+| Hidden-after-close wakeups (pre-watch) | ≈ 2.5/s |
 | Threads | 3 headless / 10 with the interface |
 
 Headless numbers come from `scripts/measure.sh --seconds 60`, which starts the
