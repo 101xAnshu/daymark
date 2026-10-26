@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build, test and package
+    name: Build, test and package (amd64)
     runs-on: ubuntu-22.04
     timeout-minutes: 35
 
@@ -82,6 +82,7 @@ jobs:
               dnf install -y --setopt=install_weak_deps=False --setopt=tsflags= /dist/daymark-*.rpm
               rpm -q daymark
               test -x /usr/bin/daymark
+              daymark --version
               test -f /usr/share/applications/daymark.desktop
               test -f /usr/share/icons/hicolor/scalable/apps/daymark.svg
               test -f /usr/share/gnome-shell/extensions/daymark@daymark.app/extension.js
@@ -95,4 +96,119 @@ jobs:
           path: |
             dist/daymark_*_amd64.deb
             dist/daymark-*-1.x86_64.rpm
+          if-no-files-found: error
+
+  arm64:
+    name: Build and package (arm64, cross)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config lintian rpm file cpio
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Add the arm64 Rust target
+        run: rustup target add aarch64-unknown-linux-gnu
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-arm64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-arm64-
+
+      - name: Build arm64 Debian package
+        run: scripts/build-deb.sh --arch arm64
+
+      - name: Inspect arm64 Debian package
+        run: |
+          test "$(dpkg-deb -f dist/daymark_*_arm64.deb Architecture)" = arm64
+          dpkg-deb -I dist/daymark_*_arm64.deb
+          dpkg-deb -c dist/daymark_*_arm64.deb
+          dpkg-deb --fsys-tarfile dist/daymark_*_arm64.deb |
+            tar -xOf - ./usr/bin/daymark | file -
+
+      - name: Lint arm64 Debian package
+        run: lintian --fail-on error dist/daymark_*_arm64.deb
+
+      - name: Build arm64 RPM package
+        run: scripts/build-rpm.sh --arch aarch64 --skip-build
+
+      - name: Inspect arm64 RPM package
+        run: |
+          test "$(rpm -qp --qf '%{ARCH}' dist/daymark-*-1.aarch64.rpm)" = aarch64
+          rpm -qip dist/daymark-*-1.aarch64.rpm
+          rpm -qlp dist/daymark-*-1.aarch64.rpm
+          rpm2cpio dist/daymark-*-1.aarch64.rpm |
+            cpio -i --to-stdout ./usr/bin/daymark 2>/dev/null | file -
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          image: tonistiigi/binfmt:latest
+          platforms: arm64
+
+      - name: arm64 Debian install smoke test under QEMU
+        timeout-minutes: 15
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "${PWD}/dist:/dist:ro" ubuntu:24.04 \
+            sh -c '
+              set -eu
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y --no-install-recommends /dist/daymark_*_arm64.deb
+              dpkg-query -W daymark
+              test -x /usr/bin/daymark
+              daymark --version
+              test -f /usr/share/applications/daymark.desktop
+              test -f /usr/share/icons/hicolor/scalable/apps/daymark.svg
+              test -f /usr/share/gnome-shell/extensions/daymark@daymark.app/extension.js
+              test -f /usr/share/doc/daymark/copyright
+            '
+
+      - name: arm64 RPM install smoke test under QEMU
+        timeout-minutes: 15
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "${PWD}/dist:/dist:ro" fedora:42 \
+            sh -c '
+              set -eu
+              dnf install -y --setopt=install_weak_deps=False --setopt=tsflags= /dist/daymark-*-1.aarch64.rpm
+              rpm -q daymark
+              test -x /usr/bin/daymark
+              daymark --version
+              test -f /usr/share/applications/daymark.desktop
+              test -f /usr/share/icons/hicolor/scalable/apps/daymark.svg
+              test -f /usr/share/gnome-shell/extensions/daymark@daymark.app/extension.js
+              test -f /usr/share/doc/daymark/copyright
+            '
+
+      - name: Upload arm64 package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: daymark-packages-arm64
+          path: |
+            dist/daymark_*_arm64.deb
+            dist/daymark-*-1.aarch64.rpm
           if-no-files-found: error
