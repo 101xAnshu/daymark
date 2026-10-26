@@ -249,6 +249,30 @@ fn parse_state(text: &str) -> Option<ExtensionState> {
     })
 }
 
+/// A focus shorter than this is noise. It should not become its own row;
+/// when it is contiguous with the preceding session it is merged into that
+/// session's row, and otherwise it is discarded.
+const NOISE_FLOOR_SECS: i64 = 5;
+
+/// Small slack for comparing the stored end of the previous session with the
+/// start of the next one: integer-second accounting can differ by one.
+const CONTIGUOUS_SLACK: i64 = 1;
+
+/// The most recently closed session that may still be extended: a following
+/// short focus merges into it, and an immediate return to the same app
+/// re-opens it instead of writing a duplicate adjacent row.
+struct PrevSession {
+    db_id: i64,
+    app_id: i64,
+    key: String,
+    started: i64,
+    ended: i64,
+    /// False after a close caused by a gap, being away, a stale state file, a
+    /// pause, or a midnight split: the time after such a close is never
+    /// counted as belonging to this row.
+    mergeable: bool,
+}
+
 struct OpenSession {
     db_id: i64,
     app_id: i64,
@@ -267,6 +291,10 @@ struct Tracker {
     index_loaded: Instant,
     resolved: HashMap<String, ResolvedApp>,
     current: Option<OpenSession>,
+    previous: Option<PrevSession>,
+    /// The noise floor in seconds; tests shrink it so old short sessions
+    /// still count at the legacy pace.
+    noise_floor: i64,
     last_tick_wall: i64,
     last_tick_mono: Instant,
     handle: TrackerHandle,
@@ -317,6 +345,8 @@ impl Tracker {
             index_loaded: Instant::now(),
             resolved: HashMap::new(),
             current: None,
+            previous: None,
+            noise_floor: NOISE_FLOOR_SECS,
             last_tick_wall: date::unix_now(),
             last_tick_mono: Instant::now(),
             handle,
@@ -380,20 +410,100 @@ impl Tracker {
         app
     }
 
-    fn close_current(&mut self, end: i64) {
+    fn close_current(&mut self, end: i64, mergeable: bool) {
         let Some(session) = self.current.take() else {
             return;
         };
         let end = end.max(session.started);
-        if end - session.started < 1 {
+        let duration = end - session.started;
+        let day = Day::from_timestamp(session.started);
+        // A short focus is noise: merge it into the preceding session when
+        // that session is contiguous and was not separated from it by a gap,
+        // being away, a stale state file, a pause, or a midnight split.
+        let target = if duration < self.noise_floor {
+            self.previous
+                .as_ref()
+                .filter(|prev| {
+                    prev.mergeable
+                        && Day::from_timestamp(prev.ended) == day
+                        && session.started - prev.ended >= 0
+                        && session.started - prev.ended <= CONTIGUOUS_SLACK
+                })
+                .map(|prev| (prev.db_id, end))
+        } else {
+            None
+        };
+        if let Some((target_id, end)) = target {
+            if let Err(e) = self
+                .store
+                .merge_short_session(session.db_id, target_id, end)
+            {
+                // Close the open row no matter what so the open-session
+                // invariant and crash recovery keep working.
+                let _ = self.store.discard_session(session.db_id);
+                self.set_status(TrackingStatus::Error, format!("Could not save usage: {e}"));
+            } else if let Some(prev) = &mut self.previous {
+                prev.ended = end;
+            }
+        } else if duration < self.noise_floor {
+            // No contiguous mergeable row: a short focus becomes no row at
+            // all. The real preceding session is untouched.
             let _ = self.store.discard_session(session.db_id);
         } else if let Err(e) = self.store.close_session(session.db_id, end) {
             self.set_status(TrackingStatus::Error, format!("Could not save usage: {e}"));
+        } else {
+            self.previous = Some(PrevSession {
+                db_id: session.db_id,
+                app_id: session.app_id,
+                key: session.key,
+                started: session.started,
+                ended: end,
+                mergeable,
+            });
         }
         if let Ok(mut live) = self.handle.live.lock() {
             live.current = None;
             live.db_version += 1;
         }
+    }
+
+    /// When focus returns to the same application right after a short-lived
+    /// interruption, continue the previous row instead of writing a second
+    /// adjacent row for the same app. Never spans a midnight or a branch that
+    /// marked the previous session unmergeable.
+    fn try_resume_previous(&mut self, app: &ResolvedApp, now: i64) -> bool {
+        let Some(prev) = self.previous.take() else {
+            return false;
+        };
+        let contiguous = prev.ended <= now && now - prev.ended <= CONTIGUOUS_SLACK;
+        if !(prev.mergeable
+            && contiguous
+            && prev.key == app.key
+            && Day::from_timestamp(prev.ended) == Day::from_timestamp(now))
+        {
+            self.previous = Some(prev);
+            return false;
+        }
+        if let Err(e) = self.store.reopen_session(prev.db_id) {
+            self.previous = Some(prev);
+            self.set_status(
+                TrackingStatus::Error,
+                format!("Could not update usage: {e}"),
+            );
+            return false;
+        }
+        self.current = Some(OpenSession {
+            db_id: prev.db_id,
+            app_id: prev.app_id,
+            key: app.key.clone(),
+            name: app.name.clone(),
+            icon: app.icon.clone(),
+            started: prev.started,
+            accumulated: prev.ended - prev.started,
+            last_heartbeat: prev.ended,
+        });
+        self.publish_current();
+        true
     }
 
     fn start_session(&mut self, app: ResolvedApp, now: i64) {
@@ -450,12 +560,13 @@ impl Tracker {
         if self.handle.reset.swap(false, Ordering::Relaxed) {
             if let Some(session) = &self.current {
                 let end = session.started + session.accumulated;
-                self.close_current(end);
+                self.close_current(end, false);
             }
             if let Err(e) = self.store.delete_all() {
                 self.set_status(TrackingStatus::Error, format!("Could not clear data: {e}"));
             }
             self.resolved.clear();
+            self.previous = None;
             if let Ok(mut live) = self.handle.live.lock() {
                 live.current = None;
                 live.db_version += 1;
@@ -495,7 +606,7 @@ impl Tracker {
                         .as_ref()
                         .map(|s| s.started + s.accumulated)
                         .unwrap_or(now_wall);
-                    self.close_current(end);
+                    self.close_current(end, false);
                 }
                 self.set_status(TrackingStatus::Paused, "Tracking is paused");
                 return;
@@ -508,7 +619,7 @@ impl Tracker {
                 .as_ref()
                 .map(|s| s.started + s.accumulated)
                 .unwrap_or(now_wall);
-            self.close_current(end);
+            self.close_current(end, false);
         }
 
         if self.last_prune_day != Some(Day::today()) {
@@ -521,7 +632,7 @@ impl Tracker {
         let Some((state, age)) = polled else {
             if let Some(session) = &self.current {
                 let end = session.started + session.accumulated;
-                self.close_current(end);
+                self.close_current(end, false);
             }
             let (status, detail) = if !self.capability.extension_installed {
                 (
@@ -551,7 +662,7 @@ impl Tracker {
         if age > 45 {
             if let Some(session) = &self.current {
                 let end = session.started + session.accumulated;
-                self.close_current(end);
+                self.close_current(end, false);
             }
             self.set_status(
                 TrackingStatus::Stale,
@@ -569,7 +680,7 @@ impl Tracker {
                         .map(|s| s.started + s.accumulated)
                         .unwrap_or(now_wall)
                 };
-                self.close_current(end);
+                self.close_current(end, false);
             }
             let detail = if state.locked {
                 "The screen is locked"
@@ -584,7 +695,7 @@ impl Tracker {
         let Some(focus) = state.focus else {
             if let Some(session) = &self.current {
                 let end = session.started + session.accumulated;
-                self.close_current(end);
+                self.close_current(end, false);
             }
             self.set_status(TrackingStatus::Active, "No active window");
             return;
@@ -596,7 +707,7 @@ impl Tracker {
         if crate::desktop::is_internal_window(focus.wm_class.as_deref(), focus.name.as_deref()) {
             if let Some(session) = &self.current {
                 let end = session.started + session.accumulated;
-                self.close_current(end);
+                self.close_current(end, false);
             }
             self.set_status(TrackingStatus::Active, "No active window");
             return;
@@ -617,9 +728,11 @@ impl Tracker {
                 } else {
                     (session.started + session.accumulated + delta).min(now_wall)
                 };
-                self.close_current(end);
+                self.close_current(end, !crossed_midnight);
             }
-            self.start_session(app.clone(), now_wall);
+            if crossed_midnight || !self.try_resume_previous(&app, now_wall) {
+                self.start_session(app.clone(), now_wall);
+            }
         } else {
             let mut heartbeat = None;
             let published = if let Some(session) = &mut self.current {
@@ -683,7 +796,7 @@ pub fn spawn(store: Store, settings: Settings) -> TrackerHandle {
             }
             if let Some(session) = &tracker.current {
                 let end = session.started + session.accumulated;
-                tracker.close_current(end);
+                tracker.close_current(end, false);
             }
         })
         .expect("could not start the tracking thread");
@@ -792,6 +905,11 @@ mod tests {
             index_loaded: Instant::now(),
             resolved: HashMap::new(),
             current: None,
+            previous: None,
+            // Legacy pace: these tests hold each focus for about one second
+            // and expect it to be recorded. Newer behaviour tests set the
+            // production floor explicitly.
+            noise_floor: 1,
             last_tick_wall: date::unix_now(),
             last_tick_mono: Instant::now(),
             handle,
@@ -808,6 +926,11 @@ mod tests {
             .store
             .sessions_between(0, date::unix_now() + 3600)
             .unwrap()
+    }
+
+    /// Same as `rows`, for tests that bind a local named `rows`.
+    fn session_rows(tracker: &Tracker) -> Vec<SessionRow> {
+        rows(tracker)
     }
 
     #[test]
@@ -954,5 +1077,219 @@ mod tests {
             started >= expiry && tracker.current.as_ref().unwrap().accumulated == 0,
             "no paused time may be recorded"
         );
+    }
+
+    /// A tracker with the production noise floor, for tests that exercise
+    /// short-focus merging and resumption.
+    fn make_floor_tracker(dir: &TempDir) -> Tracker {
+        let mut tracker = make_tracker(dir);
+        tracker.noise_floor = NOISE_FLOOR_SECS;
+        tracker
+    }
+
+    fn app(key: &str) -> ResolvedApp {
+        ResolvedApp {
+            key: key.into(),
+            name: key.into(),
+            icon: None,
+            desktop_id: None,
+            wm_class: None,
+            matched: false,
+        }
+    }
+
+    /// Plants an already-closed session and records it as the tracker's
+    /// most recent closed row.
+    fn seed_closed(tracker: &mut Tracker, key: &str, started: i64, ended: i64, mergeable: bool) {
+        let app = app(key);
+        let app_id = tracker.store.upsert_app(&app, started).unwrap();
+        let id = tracker.store.open_session(app_id, started).unwrap();
+        tracker.store.close_session(id, ended).unwrap();
+        tracker.previous = Some(PrevSession {
+            db_id: id,
+            app_id,
+            key: app.key,
+            started,
+            ended,
+            mergeable,
+        });
+    }
+
+    fn open_fake(tracker: &mut Tracker, key: &str, started: i64) {
+        let app = app(key);
+        let app_id = tracker.store.upsert_app(&app, started).unwrap();
+        let id = tracker.store.open_session(app_id, started).unwrap();
+        tracker.current = Some(OpenSession {
+            db_id: id,
+            app_id,
+            key: key.into(),
+            name: key.into(),
+            icon: None,
+            started,
+            accumulated: 0,
+            last_heartbeat: started,
+        });
+    }
+
+    #[test]
+    fn a_short_blip_merges_into_the_preceding_session() {
+        let dir = TempDir::new("blip");
+        let mut tracker = make_floor_tracker(&dir);
+        let now = date::unix_now();
+        seed_closed(&mut tracker, "org.example.Alpha", now, now + 60, true);
+        open_fake(&mut tracker, "org.example.Beta", now + 60);
+        tracker.close_current(now + 63, true);
+        let rows = session_rows(&tracker);
+        assert_eq!(rows.len(), 1, "rows: {rows:?}");
+        assert_eq!(rows[0].started, now);
+        assert_eq!(rows[0].ended, now + 63);
+        // A further short focus keeps folding into the same extended row.
+        open_fake(&mut tracker, "org.example.Gamma", now + 63);
+        tracker.close_current(now + 67, true);
+        let rows = session_rows(&tracker);
+        assert_eq!(rows.len(), 1, "rows: {rows:?}");
+        assert_eq!(rows[0].ended, now + 67);
+    }
+
+    #[test]
+    fn a_long_focus_keeps_its_own_row() {
+        let dir = TempDir::new("long");
+        let mut tracker = make_floor_tracker(&dir);
+        let now = date::unix_now();
+        seed_closed(&mut tracker, "org.example.Alpha", now, now + 60, true);
+        open_fake(&mut tracker, "org.example.Beta", now + 60);
+        tracker.close_current(now + 360, true);
+        let rows = session_rows(&tracker);
+        assert_eq!(rows.len(), 2, "rows: {rows:?}");
+        assert_eq!(rows[0].ended, now + 60);
+        assert_eq!(rows[1].started, now + 60);
+        assert_eq!(rows[1].ended, now + 360);
+    }
+
+    #[test]
+    fn a_gap_prevents_the_blip_from_becoming_or_merging_a_row() {
+        let dir = TempDir::new("gap");
+        let mut tracker = make_floor_tracker(&dir);
+        let now = date::unix_now();
+        seed_closed(&mut tracker, "org.example.Alpha", now, now + 60, true);
+        // A minute of silence separates the closed row from the blip: not
+        // contiguous, so the blip merges into nothing and is discarded.
+        open_fake(&mut tracker, "org.example.Beta", now + 120);
+        tracker.close_current(now + 123, true);
+        let rows = session_rows(&tracker);
+        assert_eq!(rows.len(), 1, "rows: {rows:?}");
+        assert_eq!(rows[0].started, now);
+        assert_eq!(rows[0].ended, now + 60);
+        assert_eq!(tracker.store.session_count(), 1);
+    }
+
+    #[test]
+    fn a_first_short_focus_makes_no_row_and_no_invented_previous_app() {
+        let dir = TempDir::new("first-blip");
+        let mut tracker = make_floor_tracker(&dir);
+        let now = date::unix_now();
+        open_fake(&mut tracker, "org.example.Beta", now);
+        tracker.close_current(now + 3, true);
+        assert_eq!(tracker.store.session_count(), 0);
+        assert_eq!(session_rows(&tracker).len(), 0);
+        assert!(tracker.previous.is_none());
+    }
+
+    #[test]
+    fn a_blip_after_an_unmergeable_close_is_discarded() {
+        let dir = TempDir::new("blocked");
+        let mut tracker = make_floor_tracker(&dir);
+        let now = date::unix_now();
+        // mergeable is false whenever the preceding close came from a gap,
+        // being away, a stale state file, or a pause.
+        seed_closed(&mut tracker, "org.example.Alpha", now, now + 60, false);
+        open_fake(&mut tracker, "org.example.Beta", now + 60);
+        tracker.close_current(now + 63, true);
+        let rows = session_rows(&tracker);
+        assert_eq!(rows.len(), 1, "rows: {rows:?}");
+        assert_eq!(rows[0].ended, now + 60, "the closed row stays untouched");
+        assert_eq!(tracker.store.session_count(), 1);
+    }
+
+    #[test]
+    fn the_noise_floor_never_merges_across_midnight() {
+        let dir = TempDir::new("midnight");
+        let mut tracker = make_floor_tracker(&dir);
+        let midnight = Day::today().start_ts();
+        // Ends one second before midnight; the blip starts at midnight. One
+        // second apart, but on different days: no merge.
+        seed_closed(
+            &mut tracker,
+            "org.example.Alpha",
+            midnight - 60,
+            midnight - 1,
+            true,
+        );
+        open_fake(&mut tracker, "org.example.Beta", midnight);
+        tracker.close_current(midnight + 2, true);
+        let rows = session_rows(&tracker);
+        assert_eq!(rows.len(), 1, "rows: {rows:?}");
+        assert_eq!(rows[0].started, midnight - 60);
+        assert_eq!(rows[0].ended, midnight - 1);
+        assert_eq!(tracker.store.session_count(), 1);
+    }
+
+    #[test]
+    fn returning_to_the_same_app_continues_its_row() {
+        let dir = TempDir::new("resume");
+        let mut tracker = make_floor_tracker(&dir);
+        write_state(
+            &dir.state_path(),
+            1,
+            Some(("org.example.Alpha", "Alpha")),
+            false,
+            0,
+        );
+        std::thread::sleep(Duration::from_millis(2300));
+        tracker.tick();
+        // Let Alpha accumulate past the noise floor.
+        std::thread::sleep(Duration::from_millis(5300));
+        tracker.tick();
+        let first_started = tracker.current.as_ref().unwrap().started;
+        let alpha_key = tracker.current.as_ref().unwrap().key.clone();
+        // A blip: Beta holds focus briefly, so it must not become a row.
+        write_state(
+            &dir.state_path(),
+            2,
+            Some(("org.example.Beta", "Beta")),
+            false,
+            0,
+        );
+        std::thread::sleep(Duration::from_millis(2300));
+        tracker.tick();
+        assert_ne!(tracker.current.as_ref().unwrap().key, alpha_key);
+        // Focus returns to Alpha: the previous row continues in place.
+        write_state(
+            &dir.state_path(),
+            3,
+            Some(("org.example.Alpha", "Alpha")),
+            false,
+            0,
+        );
+        std::thread::sleep(Duration::from_millis(2300));
+        tracker.tick();
+        let resumed = tracker.current.as_ref().unwrap();
+        assert_eq!(resumed.key, alpha_key);
+        assert_eq!(
+            resumed.started, first_started,
+            "the original Alpha row should continue, not restart"
+        );
+        // Away ends the continued row; the journal shows exactly one Alpha
+        // row covering everything.
+        write_state(&dir.state_path(), 4, None, true, date::unix_now());
+        std::thread::sleep(Duration::from_millis(5300));
+        tracker.tick();
+        assert!(tracker.current.is_none());
+        let rows = session_rows(&tracker);
+        assert_eq!(rows.len(), 1, "rows: {rows:?}");
+        assert!(rows[0].ended > rows[0].started);
+        for pair in rows.windows(2) {
+            assert!(pair[1].started >= pair[0].ended);
+        }
     }
 }
