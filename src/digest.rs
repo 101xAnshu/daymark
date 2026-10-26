@@ -3,6 +3,7 @@
 //! transport lives outside this module.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::date::{self, Day};
 use crate::db::Store;
@@ -113,6 +114,65 @@ pub fn summary(digest: &Digest) -> (String, String) {
         ));
     }
     (title, body)
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The local notification payload. The companion watches `notify.json` and
+/// shows it through GNOME's own notification system; this module never opens a
+/// socket or calls the network.
+pub fn notification_payload(digest: &Digest) -> String {
+    let (title, body) = summary(digest);
+    format!(
+        "{{\"id\":{},\"title\":{},\"body\":{}}}\n",
+        json_string(&digest.week_end.iso()),
+        json_string(&title),
+        json_string(&body)
+    )
+}
+
+/// Write the notification request into a runtime directory, atomically and
+/// readable only by the current user.
+pub fn write_notification_at(directory: &Path, digest: &Digest) -> Result<(), String> {
+    std::fs::create_dir_all(directory)
+        .map_err(|e| format!("could not create {}: {e}", directory.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700));
+    }
+    let temporary = directory.join("notify.json.tmp");
+    let path = directory.join("notify.json");
+    std::fs::write(&temporary, notification_payload(digest).as_bytes())
+        .map_err(|e| format!("could not write the notification: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&temporary, &path)
+        .map_err(|e| format!("could not publish the notification: {e}"))
+}
+
+/// Write the notification request into Daymark's runtime directory.
+pub fn write_notification(digest: &Digest) -> Result<(), String> {
+    write_notification_at(&crate::db::runtime_dir(), digest)
 }
 
 #[cfg(test)]
@@ -226,5 +286,50 @@ mod tests {
         assert!(title.contains("6h"));
         assert!(body.contains("Browser 3h"));
         assert!(body.contains("2h more than the week before"));
+    }
+
+    #[test]
+    fn a_notification_is_written_atomically() {
+        let dir = TempDir::new("notify");
+        let runtime = dir.0.join("runtime");
+        let digest = Digest {
+            week_start: Day::today().add_days(-6),
+            week_end: Day::today(),
+            total: 6 * 3600,
+            previous_total: 0,
+            top: vec![("A \"quoted\" app".into(), 3 * 3600)],
+        };
+        write_notification_at(&runtime, &digest).unwrap();
+        assert!(!runtime.join("notify.json.tmp").exists());
+        let text = fs::read_to_string(runtime.join("notify.json")).unwrap();
+        let value = crate::json::parse(&text).unwrap();
+        assert_eq!(
+            value.get("id").and_then(|v| v.as_str()),
+            Some(digest.week_end.iso().as_str())
+        );
+        assert!(
+            value
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .contains("6h")
+        );
+        assert!(
+            value
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .contains("A \"quoted\" app")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(runtime.join("notify.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 }
