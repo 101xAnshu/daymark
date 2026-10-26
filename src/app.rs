@@ -18,7 +18,10 @@ use crate::logging;
 use crate::settings::{self, Settings, ThemePref};
 use crate::stats::{self, SessionRow};
 use crate::tracker::{self, LiveState, TrackerHandle, TrackingStatus};
-use crate::{AppRow, AppWindow, DayBar, HeatCell, HeatRow, HistoryRow, HourBar, Theme};
+use crate::{
+    AppRow, AppWindow, DayBar, HeatCell, HeatRow, HistoryRow, HourBar, MetricRow, Theme,
+    TimelineSegment,
+};
 
 const HISTORY_DAYS: i32 = 14;
 /// Decoded icons are kept small; the UI shows them in a 28 pt tile.
@@ -388,6 +391,11 @@ impl AppController {
             self.ui
                 .set_hours(ModelRc::new(VecModel::from(Vec::<HourBar>::new())));
             self.ui
+                .set_metrics(ModelRc::new(VecModel::from(Vec::<MetricRow>::new())));
+            self.ui
+                .set_timeline(ModelRc::new(VecModel::from(Vec::<TimelineSegment>::new())));
+            self.ui.set_has_timeline(false);
+            self.ui
                 .set_heatmap(ModelRc::new(VecModel::from(Vec::<HeatRow>::new())));
             self.ui.set_heatmap_total("".into());
             self.ui.set_has_heatmap(false);
@@ -453,6 +461,95 @@ impl AppController {
             self.comparison_text(&rows, day, day_agg.total, store)
                 .into(),
         );
+
+        // A quiet, factual row: no scores or targets, only what the stored
+        // intervals already say about the selected day.
+        let stretch = stats::longest_stretch(&rows, day);
+        let app_count = stats::distinct_apps(&rows, day);
+        let after_midnight = stats::after_midnight_seconds(&rows, day);
+        let mut metrics = vec![
+            MetricRow {
+                label: "Longest stretch".into(),
+                value: if stretch > 0 {
+                    date::format_duration(stretch)
+                } else {
+                    "—".to_string()
+                }
+                .into(),
+                detail: "uninterrupted".into(),
+                show_rule: false,
+                accent: false,
+            },
+            MetricRow {
+                label: "Apps".into(),
+                value: app_count.to_string().into(),
+                detail: "distinct".into(),
+                show_rule: true,
+                accent: false,
+            },
+            MetricRow {
+                label: "After midnight".into(),
+                value: if after_midnight > 0 {
+                    date::format_duration(after_midnight)
+                } else {
+                    "None".to_string()
+                }
+                .into(),
+                detail: format!("00:00–{:02}:00", stats::AFTER_MIDNIGHT_HOURS).into(),
+                show_rule: true,
+                accent: false,
+            },
+        ];
+        let (week_value, week_detail) = match stats::week_delta(&rows, day) {
+            Some(delta) if delta.abs() < 300 => ("Even".to_string(), "same weekday"),
+            Some(delta) => (
+                format!(
+                    "{}{}",
+                    if delta > 0 { "+" } else { "−" },
+                    date::format_delta(delta)
+                ),
+                "same weekday",
+            ),
+            None => ("—".to_string(), "no prior week"),
+        };
+        metrics.push(MetricRow {
+            label: "vs last week".into(),
+            value: week_value.into(),
+            detail: week_detail.into(),
+            show_rule: true,
+            accent: false,
+        });
+        // The Now cell is only honest for today with a session in progress.
+        if self.selected_offset == 0 {
+            if let Some(current) = &live.current {
+                metrics.push(MetricRow {
+                    label: "Now".into(),
+                    value: current.name.clone().into(),
+                    detail: format!("{} so far", date::format_duration(current.elapsed.max(0)))
+                        .into(),
+                    show_rule: true,
+                    accent: true,
+                });
+            }
+        }
+        self.ui.set_metrics(ModelRc::new(VecModel::from(metrics)));
+
+        let timeline: Vec<TimelineSegment> = stats::timeline_segments(&rows, day)
+            .into_iter()
+            .map(|segment| {
+                let tint = app_infos
+                    .get(&segment.app_id)
+                    .map(|info| app_tint(&info.key, self.dark))
+                    .unwrap_or_else(|| app_tint(&segment.app_id.to_string(), self.dark));
+                TimelineSegment {
+                    start: segment.start,
+                    width: (segment.end - segment.start).max(0.0),
+                    tint,
+                }
+            })
+            .collect();
+        self.ui.set_has_timeline(!timeline.is_empty());
+        self.ui.set_timeline(ModelRc::new(VecModel::from(timeline)));
 
         let week_totals = stats::totals_ending_at(&rows, day, 7);
         let max_week = week_totals

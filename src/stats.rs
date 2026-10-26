@@ -3,13 +3,26 @@
 //! tested.
 
 use crate::date::{self, Day};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// The early hours counted as "after midnight" in the day metrics. Kept small
+/// and explicit so the interface can label the same window it measures.
+pub const AFTER_MIDNIGHT_HOURS: i64 = 5;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SessionRow {
     pub app_id: i64,
     pub started: i64,
     pub ended: i64,
+}
+
+/// One session on the day timeline, as a fraction of the local day. Fractions
+/// rather than pixels keep the UI independent of the window width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimelineSegment {
+    pub app_id: i64,
+    pub start: f32,
+    pub end: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -80,6 +93,114 @@ pub fn total_for_day(rows: &[SessionRow], day: Day) -> i64 {
     rows.iter()
         .map(|r| overlap(r.started, r.ended, start, end))
         .sum()
+}
+
+/// The part of a stored interval that falls inside `day`, if any.
+fn clipped_span(row: &SessionRow, day: Day) -> Option<(i64, i64)> {
+    let start = row.started.max(day.start_ts());
+    let end = row.ended.min(day.end_ts());
+    (end > start).then_some((start, end))
+}
+
+/// Longest unbroken run of recorded activity on `day`, regardless of which
+/// application held focus. Contiguous or overlapping sessions join; any idle
+/// gap starts a new run. Returns 0 for an empty day.
+pub fn longest_stretch(rows: &[SessionRow], day: Day) -> i64 {
+    let mut spans: Vec<(i64, i64)> = rows.iter().filter_map(|r| clipped_span(r, day)).collect();
+    spans.sort_unstable();
+    let Some((mut start, mut end)) = spans.first().copied() else {
+        return 0;
+    };
+    let mut best = end - start;
+    for (next_start, next_end) in spans.into_iter().skip(1) {
+        if next_start <= end {
+            end = end.max(next_end);
+        } else {
+            start = next_start;
+            end = next_end;
+        }
+        best = best.max(end - start);
+    }
+    best
+}
+
+/// Number of different applications with recorded time on `day`.
+pub fn distinct_apps(rows: &[SessionRow], day: Day) -> usize {
+    rows.iter()
+        .filter(|r| clipped_span(r, day).is_some())
+        .map(|r| r.app_id)
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+/// Recorded time between local midnight and [`AFTER_MIDNIGHT_HOURS`] on
+/// `day`. A session that straddles midnight contributes only its early-morning
+/// portion, and the 05:00 boundary is excluded.
+pub fn after_midnight_seconds(rows: &[SessionRow], day: Day) -> i64 {
+    let day_start = day.start_ts();
+    let window_end = early_morning_end(day);
+    rows.iter()
+        .map(|r| overlap(r.started, r.ended, day_start, window_end))
+        .sum()
+}
+
+/// Timestamp of local 05:00 on `day`. Found by stepping through the early
+/// hours so a DST transition cannot turn the five-hour label into four or six
+/// elapsed hours.
+fn early_morning_end(day: Day) -> i64 {
+    let day_end = day.end_ts();
+    let mut cutoff = day.start_ts();
+    while cutoff < day_end && date::local_hour(cutoff) < AFTER_MIDNIGHT_HOURS as u32 {
+        cutoff += 60;
+    }
+    cutoff.min(day_end)
+}
+
+/// Difference between `day` and the same weekday one week earlier. `None` when
+/// the earlier day has no recorded time, so the interface never compares
+/// against an invented zero baseline.
+pub fn week_delta(rows: &[SessionRow], day: Day) -> Option<i64> {
+    let previous = total_for_day(rows, day.add_days(-7));
+    (previous > 0).then(|| total_for_day(rows, day) - previous)
+}
+
+/// Sessions clipped to `day` and expressed as fractions of the local day.
+/// Touching or overlapping sessions from the same app are merged, then the
+/// result is ordered by start time. An empty day yields an empty vector.
+pub fn timeline_segments(rows: &[SessionRow], day: Day) -> Vec<TimelineSegment> {
+    let day_start = day.start_ts();
+    let day_seconds = (day.end_ts() - day_start).max(1) as f32;
+    let mut per_app: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
+    for row in rows {
+        if let Some(span) = clipped_span(row, day) {
+            per_app.entry(row.app_id).or_default().push(span);
+        }
+    }
+
+    let mut segments = Vec::new();
+    for (app_id, mut spans) in per_app {
+        spans.sort_unstable();
+        let mut merged: Vec<(i64, i64)> = Vec::new();
+        for (start, end) in spans {
+            match merged.last_mut() {
+                Some((_, last_end)) if start <= *last_end => *last_end = (*last_end).max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        for (start, end) in merged {
+            segments.push(TimelineSegment {
+                app_id,
+                start: (start - day_start) as f32 / day_seconds,
+                end: (end - day_start) as f32 / day_seconds,
+            });
+        }
+    }
+    segments.sort_by(|a, b| {
+        a.start
+            .total_cmp(&b.start)
+            .then_with(|| a.app_id.cmp(&b.app_id))
+    });
+    segments
 }
 
 /// Totals for `days` consecutive days ending at `end` (inclusive), oldest first.
@@ -263,5 +384,205 @@ mod tests {
         assert_eq!(heat[1].1[0], 30 * 60);
         assert_eq!(heat[0].1.iter().sum::<i64>(), 30 * 60);
         assert_eq!(heat[1].1.iter().sum::<i64>(), 30 * 60);
+    }
+
+    #[test]
+    fn longest_stretch_joins_contiguous_sessions_but_not_gaps() {
+        let day = Day::today();
+        let rows = [
+            SessionRow {
+                app_id: 1,
+                started: at(day, 9, 0),
+                ended: at(day, 9, 30),
+            },
+            // A focus switch with no idle gap is still one stretch.
+            SessionRow {
+                app_id: 2,
+                started: at(day, 9, 30),
+                ended: at(day, 10, 15),
+            },
+            // 45 idle minutes break the run.
+            SessionRow {
+                app_id: 1,
+                started: at(day, 11, 0),
+                ended: at(day, 11, 20),
+            },
+        ];
+        assert_eq!(longest_stretch(&rows, day), 75 * 60);
+    }
+
+    #[test]
+    fn longest_stretch_merges_overlaps_and_clips_midnight() {
+        let day = Day::today();
+        let yesterday = day.add_days(-1);
+        let rows = [
+            SessionRow {
+                app_id: 1,
+                started: at(day, 9, 0),
+                ended: at(day, 10, 0),
+            },
+            SessionRow {
+                app_id: 2,
+                started: at(day, 9, 30),
+                ended: at(day, 10, 30),
+            },
+        ];
+        assert_eq!(longest_stretch(&rows, day), 90 * 60);
+
+        let across = [SessionRow {
+            app_id: 1,
+            started: at(yesterday, 23, 30),
+            ended: at(day, 0, 45),
+        }];
+        assert_eq!(longest_stretch(&across, yesterday), 30 * 60);
+        assert_eq!(longest_stretch(&across, day), 45 * 60);
+    }
+
+    #[test]
+    fn longest_stretch_of_an_empty_day_is_zero() {
+        let day = Day::today();
+        assert_eq!(longest_stretch(&[], day), 0);
+        let outside = [SessionRow {
+            app_id: 1,
+            started: at(day.add_days(-1), 9, 0),
+            ended: at(day.add_days(-1), 10, 0),
+        }];
+        assert_eq!(longest_stretch(&outside, day), 0);
+    }
+
+    #[test]
+    fn distinct_apps_ignores_duplicates_and_other_days() {
+        let day = Day::today();
+        let rows = [
+            SessionRow {
+                app_id: 1,
+                started: at(day, 9, 0),
+                ended: at(day, 9, 30),
+            },
+            SessionRow {
+                app_id: 1,
+                started: at(day, 10, 0),
+                ended: at(day, 10, 30),
+            },
+            SessionRow {
+                app_id: 2,
+                started: at(day, 11, 0),
+                ended: at(day, 11, 30),
+            },
+            SessionRow {
+                app_id: 3,
+                started: at(day.add_days(-1), 11, 0),
+                ended: at(day.add_days(-1), 12, 0),
+            },
+        ];
+        assert_eq!(distinct_apps(&rows, day), 2);
+        assert_eq!(distinct_apps(&rows, day.add_days(-1)), 1);
+        assert_eq!(distinct_apps(&[], day), 0);
+    }
+
+    #[test]
+    fn after_midnight_counts_only_the_early_hours() {
+        let day = Day::today();
+        let yesterday = day.add_days(-1);
+        let cutoff = early_morning_end(day);
+        assert_eq!(date::local_hour(cutoff), 5);
+        let rows = [
+            // Straddles midnight: 90 minutes land after 00:00.
+            SessionRow {
+                app_id: 1,
+                started: at(yesterday, 23, 0),
+                ended: at(day, 1, 30),
+            },
+            // Only the half hour before local 05:00 counts.
+            SessionRow {
+                app_id: 2,
+                started: cutoff - 30 * 60,
+                ended: cutoff + 3600,
+            },
+            SessionRow {
+                app_id: 3,
+                started: at(day, 7, 0),
+                ended: at(day, 8, 0),
+            },
+        ];
+        assert_eq!(after_midnight_seconds(&rows, day), 90 * 60 + 30 * 60);
+        assert_eq!(after_midnight_seconds(&rows, yesterday), 0);
+        assert_eq!(after_midnight_seconds(&[], day), 0);
+    }
+
+    #[test]
+    fn week_delta_compares_the_same_weekday() {
+        let day = Day::today();
+        let previous = day.add_days(-7);
+        let rows = [
+            SessionRow {
+                app_id: 1,
+                started: at(day, 9, 0),
+                ended: at(day, 10, 0),
+            },
+            SessionRow {
+                app_id: 1,
+                started: at(previous, 9, 0),
+                ended: at(previous, 9, 30),
+            },
+        ];
+        assert_eq!(week_delta(&rows, day), Some(30 * 60));
+        assert_eq!(week_delta(&rows, previous), None);
+        assert_eq!(week_delta(&[], day), None);
+    }
+
+    #[test]
+    fn timeline_segments_clip_to_the_day_and_split_midnight() {
+        let day = Day::today();
+        let yesterday = day.add_days(-1);
+        let day_start = day.start_ts();
+        let day_seconds = (day.end_ts() - day_start) as f32;
+        let rows = [SessionRow {
+            app_id: 1,
+            started: at(yesterday, 23, 0),
+            ended: at(day, 1, 0),
+        }];
+        let today = timeline_segments(&rows, day);
+        assert_eq!(today.len(), 1);
+        assert_eq!(today[0].app_id, 1);
+        assert!((today[0].start - 0.0).abs() < 0.0001);
+        assert!(((today[0].end - today[0].start) * day_seconds - 3600.0).abs() < 1.0);
+
+        let before = timeline_segments(&rows, yesterday);
+        assert_eq!(before.len(), 1);
+        assert!((before[0].end - 1.0).abs() < 0.0001);
+        assert!((((before[0].end - before[0].start) * day_seconds) - 3600.0).abs() < 1.0);
+
+        assert!(timeline_segments(&[], day).is_empty());
+    }
+
+    #[test]
+    fn timeline_segments_merge_touching_spans_from_one_app() {
+        let day = Day::today();
+        let rows = [
+            SessionRow {
+                app_id: 1,
+                started: at(day, 9, 0),
+                ended: at(day, 9, 30),
+            },
+            SessionRow {
+                app_id: 2,
+                started: at(day, 9, 45),
+                ended: at(day, 10, 15),
+            },
+            SessionRow {
+                app_id: 1,
+                started: at(day, 9, 30),
+                ended: at(day, 10, 0),
+            },
+        ];
+        let segments = timeline_segments(&rows, day);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].app_id, 1);
+        assert!((segments[0].start - segments[1].start).abs() > 0.0001);
+        let day_seconds = (day.end_ts() - day.start_ts()) as f32;
+        let first_minutes = (segments[0].end - segments[0].start) * day_seconds / 60.0;
+        assert!((first_minutes - 60.0).abs() < 1.0);
+        assert_eq!(segments[1].app_id, 2);
     }
 }

@@ -44,6 +44,59 @@ export struct HistoryRow {
     offset: int,
 }
 
+export struct MetricRow {
+    label: string,
+    value: string,
+    detail: string,
+    show-rule: bool,
+    accent: bool,
+}
+
+export struct TimelineSegment {
+    start: float,
+    width: float,
+    tint: color,
+}
+
+component MetricCell inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <string> detail;
+    in property <bool> accent: false;
+    height: 70px;
+
+    VerticalLayout {
+        horizontal-stretch: 1;
+        padding-left: 18px;
+        padding-right: 18px;
+        spacing: 3px;
+        alignment: center;
+
+        Text {
+            text: root.label;
+            font-size: Theme.micro-size;
+            font-weight: 600;
+            color: Theme.text-secondary;
+            letter-spacing: 0.5px;
+            overflow: elide;
+        }
+        Text {
+            text: root.value;
+            font-size: 16px;
+            font-weight: 600;
+            color: root.accent ? Theme.accent-text : Theme.text;
+            overflow: elide;
+        }
+        Text {
+            text: root.detail;
+            font-size: Theme.micro-size;
+            color: Theme.text-tertiary;
+            visible: root.detail != "";
+            overflow: elide;
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Daymark";
     preferred-width: 1120px;
@@ -72,6 +125,9 @@ export component AppWindow inherits Window {
     in property <string> apps-caption: "";
     in property <string> peak-text: "";
     in property <[HourBar]> hours: [];
+    in property <[MetricRow]> metrics: [];
+    in property <[TimelineSegment]> timeline: [];
+    in property <bool> has-timeline: false;
     in property <[HeatRow]> heatmap: [];
     in property <string> heatmap-total: "";
     in property <bool> has-heatmap: false;
@@ -602,11 +658,149 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // ---- Weekly chart ----
+                            // ---- Day metrics ----
                             Rectangle {
-                                height: root.show-banner ? 30px : 18px;
+                                height: root.show-banner ? 24px : 20px;
                                 background: transparent;
                             }
+
+                            Rectangle {
+                                height: 70px;
+                                border-radius: Theme.radius-md;
+                                background: Theme.surface;
+                                border-width: 1px;
+                                border-color: Theme.line;
+
+                                HorizontalLayout {
+                                    width: 100%;
+                                    height: 70px;
+
+                                    for metric in root.metrics:
+                                        HorizontalLayout {
+                                            horizontal-stretch: 1;
+                                            height: 70px;
+                                            Rectangle {
+                                                visible: metric.show-rule;
+                                                width: 1px;
+                                                height: 38px;
+                                                background: Theme.line;
+                                            }
+                                            MetricCell {
+                                                horizontal-stretch: 1;
+                                                label: metric.label;
+                                                value: metric.value;
+                                                detail: metric.detail;
+                                                accent: metric.accent;
+                                            }
+                                        }
+                                }
+                            }
+
+                            // ---- Day timeline ----
+                            Rectangle { height: 26px; background: transparent; }
+
+                            HorizontalLayout {
+                                width: 100%;
+                                Text {
+                                    text: "Day timeline";
+                                    font-size: Theme.body-size;
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text {
+                                    text: "00:00 – 24:00";
+                                    font-size: Theme.micro-size;
+                                    color: Theme.text-tertiary;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Rectangle { height: 10px; background: transparent; }
+
+                            Rectangle {
+                                height: 34px;
+                                border-radius: 8px;
+                                background: Theme.surface-muted;
+                                clip: true;
+
+                                for segment in root.timeline:
+                                    Rectangle {
+                                        x: parent.width * segment.start;
+                                        width: max(1px, parent.width * segment.width);
+                                        height: 100%;
+                                        background: segment.tint;
+                                        opacity: 0.86;
+                                    }
+
+                                if (!root.has-timeline) : Text {
+                                    text: "Nothing recorded on this day";
+                                    width: 100%;
+                                    height: 100%;
+                                    font-size: Theme.small-size;
+                                    color: Theme.text-tertiary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Rectangle { height: 7px; background: transparent; }
+
+                            timeline-axis := Rectangle {
+                                height: 14px;
+                                background: transparent;
+                                property <length> slot: self.width / 24;
+                                Text {
+                                    x: 0px;
+                                    width: 44px;
+                                    height: 100%;
+                                    text: "00:00";
+                                    font-size: Theme.micro-size;
+                                    color: Theme.text-tertiary;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    x: timeline-axis.slot * 6 - 20px;
+                                    width: 40px;
+                                    height: 100%;
+                                    text: "06:00";
+                                    font-size: Theme.micro-size;
+                                    color: Theme.text-tertiary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    x: timeline-axis.slot * 12 - 20px;
+                                    width: 40px;
+                                    height: 100%;
+                                    text: "12:00";
+                                    font-size: Theme.micro-size;
+                                    color: Theme.text-tertiary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    x: timeline-axis.slot * 18 - 20px;
+                                    width: 40px;
+                                    height: 100%;
+                                    text: "18:00";
+                                    font-size: Theme.micro-size;
+                                    color: Theme.text-tertiary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    x: timeline-axis.width - 44px;
+                                    width: 44px;
+                                    height: 100%;
+                                    text: "24:00";
+                                    font-size: Theme.micro-size;
+                                    color: Theme.text-tertiary;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            // ---- Weekly chart ----
+                            Rectangle { height: 26px; background: transparent; }
 
                             HorizontalLayout {
                                 Text {

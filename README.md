@@ -54,7 +54,7 @@ not the headless footprint.
 
 | You get | You never get |
 | --- | --- |
-| One calm day view — total time, the week's shape, the day's rhythm | Sign-ups, profiles or a subscription |
+| One calm day view — total time, a metrics row, a 24-hour timeline, the week's shape and the day's rhythm | Sign-ups, profiles or a subscription |
 | A seven-day rhythm view — a 7×24 heatmap of when the week is busy | Streaks, scores or guilt mechanics |
 | A per-app breakdown with real icons and quiet time bars | Window titles, keystrokes, clipboard data or screenshots |
 | Fourteen days of history at a glance | Cloud sync, analytics, telemetry or any network code |
@@ -185,6 +185,15 @@ graphical session.
 ## Use
 
 - Click a day in the weekly chart, or use `←` / `→` to move one day.
+- The day view opens with a quiet metrics row: the longest uninterrupted
+  stretch, the number of distinct apps, the time recorded after midnight
+  (00:00–05:00), and the change from the same weekday last week. A **Now**
+  cell appears while a session is live today and shows the current app and its
+  running time. There are no scores, streaks or targets.
+- The 24-hour timeline draws each recorded session as a small block, coloured
+  by app and clipped to the selected day. It comes from the same stored
+  intervals as the rest of the view and holds no window titles, URLs or
+  network data.
 - `T` returns to today; `Ctrl+1` / `Ctrl+2` / `Ctrl+3` switch between Day,
   History and Rhythm.
 - Rhythm shows the last seven days as a 7×24 heatmap: rows are days, columns
@@ -330,10 +339,11 @@ created.
 
 ## Verification
 
-- `cargo test --lib`: **85 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **93 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
-  across midnight, idle-gap exclusion, per-app totals,
-  averages, JSON parsing (including the seconds/milliseconds compatibility
+  across midnight, idle-gap exclusion, per-app totals, day metrics and timeline
+  segmentation (empty days, gaps, overlaps, after-midnight and cross-midnight
+  sessions), averages, JSON parsing (including the seconds/milliseconds compatibility
   path), desktop-entry parsing (quoted `Exec`, `NoDisplay`, hidden entries),
   shell-window filtering, SQLite persistence, legacy-row migration, corruption
   recovery, crash recovery, at-most-one-open-session, pruning, daily rollup
