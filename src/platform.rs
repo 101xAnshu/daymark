@@ -321,6 +321,49 @@ pub fn apply_autostart(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether a desktop-entry body deliberately switches the autostart entry
+/// off. GNOME's own startup tools write `X-GNOME-Autostart-enabled=false`
+/// (or `Hidden=true`) instead of deleting the file; such an entry is the
+/// user's choice. Pure so tests can cover it without a session.
+fn autostart_entry_disabled(body: &str) -> bool {
+    body.lines().any(|line| {
+        let line = line.trim();
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        let key = key.trim();
+        let value = value.trim().to_ascii_lowercase();
+        let truthy = matches!(value.as_str(), "true" | "1");
+        let falsy = matches!(value.as_str(), "false" | "0");
+        if key.eq_ignore_ascii_case("Hidden") {
+            return truthy;
+        }
+        if key.eq_ignore_ascii_case("X-GNOME-Autostart-enabled") {
+            return falsy;
+        }
+        false
+    })
+}
+
+/// Whether the existing autostart entry marks Daymark as disabled. A
+/// missing or unreadable file is not a deliberate disable.
+pub fn autostart_disabled() -> bool {
+    fs::read_to_string(db::autostart_path())
+        .map(|body| autostart_entry_disabled(&body))
+        .unwrap_or(false)
+}
+
+/// Apply the per-launch autostart default without overriding a deliberately
+/// disabled entry: when the existing file says the user turned Daymark off,
+/// it is left exactly as it is. Explicit consent from the interface still
+/// goes through `apply_autostart`, which writes through.
+pub fn apply_autostart_respecting_disabled(enabled: bool) -> Result<(), String> {
+    if enabled && autostart_disabled() {
+        return Ok(());
+    }
+    apply_autostart(enabled)
+}
+
 pub fn autostart_installed() -> bool {
     db::autostart_path().is_file()
 }
@@ -476,6 +519,29 @@ mod tests {
         assert_eq!(quote_exec("/usr/bin/daymark"), "/usr/bin/daymark");
         assert_eq!(quote_exec("/home/a b/daymark"), "\"/home/a b/daymark\"");
         assert_eq!(quote_exec("/tmp/a$b"), "\"/tmp/a\\$b\"");
+    }
+
+    #[test]
+    fn a_deliberately_disabled_autostart_entry_is_recognised() {
+        assert!(autostart_entry_disabled("X-GNOME-Autostart-enabled=false"));
+        assert!(autostart_entry_disabled(
+            "[Desktop Entry]\nType=Application\nX-GNOME-Autostart-enabled = false\n"
+        ));
+        assert!(autostart_entry_disabled("[Desktop Entry]\nHidden=true\n"));
+        assert!(autostart_entry_disabled("[Desktop Entry]\nHidden=1\n"));
+        assert!(autostart_entry_disabled(
+            "[Desktop Entry]\nType=Application\nX-GNOME-Autostart-enabled=false\n"
+        ));
+        assert!(!autostart_entry_disabled(
+            autostart_body(Path::new("/usr/bin/daymark")).as_str()
+        ));
+        assert!(!autostart_entry_disabled(
+            "[Desktop Entry]\nType=Application\nX-GNOME-Autostart-enabled=true\nHidden=false\n"
+        ));
+        assert!(!autostart_entry_disabled(
+            "[Desktop Entry]\nType=Application\nExec=/usr/bin/daymark --background\n"
+        ));
+        assert!(!autostart_entry_disabled(""), "empty body is not a disable");
     }
 
     #[test]
