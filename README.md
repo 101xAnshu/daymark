@@ -41,12 +41,14 @@ went, and how that compares with your own history. It asks for no account, opens
 no browser engine, makes no network requests, and keeps everything in one small
 SQLite file on the machine in front of you.
 
-The window is a real native app: 8.5 MiB on disk. Started at login with
+The window is a real native app: 8.7 MiB on disk. Started at login with
 `--background`, it opens no window and creates no Slint platform or event loop:
-about 8 MB of memory, 0% idle CPU, and roughly one wakeup every two seconds for
-the tracker. Once you open the window, the interface stays alive for the rest of
-the process, including after you close it to the background. That costs about
-24 MB and keeps the tracker poll, so it is not the headless footprint.
+about 8 MB of memory, 0% idle CPU, and no timed polling while the companion is
+quiet. The tracker waits on an inotify watch and wakes when the companion
+publishes a change, with a 30-second safety check. Once you open the window, the
+interface stays alive for the rest of the process, including after you close it
+to the background. That costs about 24 MB and keeps the tracker watch, so it is
+not the headless footprint.
 
 ## What you get
 
@@ -252,13 +254,19 @@ The companion publishes only this to `$XDG_RUNTIME_DIR/daymark/state.json`:
 It never reads window titles, keystrokes, clipboard data, screenshots or
 application content, and it contains no networking code.
 
-The Rust tracker reads that file every two seconds and stores non-overlapping
-intervals in SQLite. It closes them on focus change, idle, lock, sleep or pause,
-and writes a heartbeat every 30 seconds. Idle time is trimmed back to the moment
-the companion says input stopped. Sleep and wall-clock jumps accrue nothing
-because durations use a monotonic clock. Sessions that cross midnight are split,
-and closed intervals are aggregated with overlap clamping, so a day's totals
-always come from stored data.
+The Rust tracker watches `$XDG_RUNTIME_DIR/daymark/` with inotify for the state
+file being closed after a write, moved into place by an atomic replacement,
+created, deleted or given new attributes. A focus, idle or lock change is
+therefore handled as soon as the companion publishes it, usually within
+milliseconds. A 30-second timeout re-reads the file in case an event was missed,
+replacing the old two-second poll. If the runtime directory or the inotify watch
+cannot be created, Daymark logs that once and falls back to the two-second poll.
+The tracker stores non-overlapping intervals in SQLite. It closes them on focus
+change, idle, lock, sleep or pause, and writes a heartbeat every 30 seconds.
+Idle time is trimmed back to the moment the companion says input stopped. Sleep
+and wall-clock jumps accrue nothing because durations use a monotonic clock.
+Sessions that cross midnight are split, and closed intervals are aggregated with
+overlap clamping, so a day's totals always come from stored data.
 
 GNOME Shell's own surfaces are filtered out: the `gjs` host processes
 (notifications, screen saver), the desktop-icons window, docks and other
@@ -314,13 +322,15 @@ desktop session's Wayland/X11 libraries. The same build runs on Xorg; the old
 
 `--background` is genuinely invisible: no window, no Slint platform and no event
 loop exist until the interface is requested. The UI is created lazily when you
-open Daymark from the application grid. The tracker still polls the companion
-every two seconds and writes a heartbeat every 30 seconds, so the headless
-process is low-idle, not zero-wakeup.
+open Daymark from the application grid. The tracker still watches the companion
+file and writes a heartbeat every 30 seconds, so the headless process wakes on
+changes rather than polling twice a second. It keeps a 30-second timeout for a
+missed event, and falls back to the two-second poll if the watch cannot be
+created.
 
 ## Verification
 
-- `cargo test --lib`: **71 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **80 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
   across midnight, idle-gap exclusion, per-app totals,
   averages, JSON parsing (including the seconds/milliseconds compatibility
@@ -331,23 +341,31 @@ process is low-idle, not zero-wakeup.
   selection (system-wide preferred, user folder as fallback), doctor reading the
   packaged system-wide companion and its version, the first-run decision,
   autostart-entry consent parsing (a deliberately disabled entry is left alone),
-  and read-only doctor/status formatting against a temporary database with its
-  write connection still open.
+  read-only doctor/status formatting against a temporary database with its
+  write connection still open, the inotify wait decision (event versus timeout),
+  the 30-second watch versus the two-second fallback, the required watch mask,
+  and a real watcher waking on a state-file write, an atomic replacement and a
+  deletion, plus wake-pipe interruption and an unwatchable path.
+- The watch path was exercised with a real inotify watcher against temporary
+  runtime directories. The live handoff from a GNOME companion focus change to
+  the next tracker tick still needs a session with the companion loaded.
 - The release binary was run on a live GNOME 50.1 Wayland session. The window
   reaches GNOME with app id/WM class `daymark`, so the shell matches it to the
   desktop entry and the companion reports `daymark.desktop` instead of an
   "Unknown" window-backed app.
 - `--background` created no window and no Slint event loop. A 60-second run of
-  `scripts/measure.sh` with temporary XDG directories measured **7.9 MiB RSS,
-  0.00% CPU, 0.48 wakeups/s and 3 threads**; repeated runs ranged from 7.4 to
-  8.2 MiB. A second launch shows the running
-  instance; `--quit` stops it cleanly.
+  `scripts/measure.sh` with temporary XDG directories measured **8.95 MiB RSS,
+  0.00% CPU, 0.03 wakeups/s and 3 threads**; the single periodic wake is the
+  30-second watch safety check. A second launch shows the running instance;
+  `--quit` stops it cleanly.
 - Closing the window leaves it unmapped, stops the 700 ms refresh timer, and
   still handles Show and Quit over the local socket. In the same live session
   (X11 backend on XWayland; native Wayland destroys the hidden surface instead),
   the hidden process held 23.8 MiB RSS at 0.00% CPU and 2.5 wakeups/s, down from
-  3.9/s with the window open. The remaining wakeups are the tracker poll and
-  event-loop housekeeping, so hidden-after-close is not a zero-wakeup state.
+  3.9/s with the window open. That sample predates the watch, so its tracker
+  share is now event-driven rather than a two-second poll; the remaining
+  wakeups are event-loop housekeeping, and hidden-after-close is still not a
+  zero-wakeup state.
 - The one-time migration ran on the live database (a backup copy was taken
   first): the `gjs` row and its sessions were removed and the
   `wm_class:com.t3tools.t3code` fallback row was merged into
@@ -362,16 +380,18 @@ process is low-idle, not zero-wakeup.
 
 ## Measured results
 
-Measured on Ubuntu 26.04, GNOME Shell 50.1, Wayland, x86_64, release build:
+Measured on Ubuntu 26.04, GNOME Shell 50.1, Wayland, x86_64, release build.
+The headless rows are from the watch build; the visible and hidden rows were
+sampled before it, so their tracker poll is now event-driven.
 
 | Item | Result |
 | --- | ---: |
-| Stripped executable | **8,936,816 bytes (8.52 MiB)** |
-| Installed application files (binary, icon, entries, extension) | ≈ 8.9 MB |
+| Stripped executable | **9,131,376 bytes (8.71 MiB)** |
+| Installed application files (binary, icon, entries, extension) | ≈ 9.2 MB |
 | Fresh database | 4 KB |
-| Headless RSS (`--background`) | 7.4–8.2 MB across runs (≈ 8 MB) |
+| Headless RSS (`--background`) | 8.95 MiB (one 60 s run) |
 | Headless CPU, 60 s sample | 0.00% |
-| Headless wakeups | 0.48/s (the tracker poll) |
+| Headless wakeups | 0.03/s (the 30-second safety check) |
 | Visible RSS | ≈ 23.8 MB |
 | Visible CPU, 20 s sample | 0.00% |
 | Visible wakeups | ≈ 3.9/s |
@@ -384,10 +404,10 @@ Headless numbers come from `scripts/measure.sh --seconds 60`, which starts the
 release binary with temporary XDG directories and asks it to quit over its own
 socket. The other rows were sampled the same way on a live session with the
 X11 backend on XWayland; native Wayland destroys the hidden surface instead, so
-its memory can be lower while the tracker poll remains. Wakeups are total
-voluntary context switches per second across every thread, not just the main
-thread. CPU is from `/proc/<pid>/stat` (`utime+stime` ticks / 100 Hz / interval);
-RSS is from `/proc/<pid>/status`; samples were taken after a 5 second settle.
+its memory can be lower. Wakeups are total voluntary context switches per second
+across every thread, not just the main thread. CPU is from `/proc/<pid>/stat`
+(`utime+stime` ticks / 100 Hz / interval); RSS is from `/proc/<pid>/status`;
+samples were taken after a 5 second settle.
 Dynamic dependencies: `libc`, `libm`, `libgcc_s`; the GNOME/Wayland libraries
 are already part of the session. SQLite is compiled in. The binary sits below
 the 10 MB budget; that budget paid for SVG icons, AccessKit accessibility and
