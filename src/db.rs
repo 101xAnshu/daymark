@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// The only values stored in `sessions.presence`. Anything unrecognised falls
 /// back to input so an older or malformed caller cannot break the journal.
@@ -29,6 +29,10 @@ pub struct AppInfo {
     pub name: String,
     pub icon: Option<String>,
     pub desktop_id: Option<String>,
+    /// A user-chosen display name. The recorded identity stays in `key`.
+    pub alias: Option<String>,
+    /// Hidden from lists and totals, but still recorded.
+    pub ignored: bool,
 }
 
 pub struct Store {
@@ -227,6 +231,19 @@ impl Store {
                  COMMIT;",
             )
             .map_err(|e| format!("could not add the presence column: {e}"))?;
+        }
+
+        if version < 5 {
+            // User-facing app preferences. Aliases are display-only; ignored
+            // apps stay in the database but are hidden from lists and totals.
+            conn.execute_batch(
+                "BEGIN;\n\
+                 ALTER TABLE apps ADD COLUMN alias TEXT;\n\
+                 ALTER TABLE apps ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0;\n\
+                 PRAGMA user_version = 5;\n\
+                 COMMIT;",
+            )
+            .map_err(|e| format!("could not add the app preference columns: {e}"))?;
         }
 
         // A crash can leave one open interval. Its end timestamp is the last
@@ -459,7 +476,7 @@ impl Store {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT id, key, name, icon_ref, desktop_id FROM apps WHERE id IN ({placeholders})"
+            "SELECT id, key, name, icon_ref, desktop_id, alias, ignored FROM apps WHERE id IN ({placeholders})"
         );
         let Ok(mut stmt) = self.conn.prepare(&sql) else {
             return HashMap::new();
@@ -471,6 +488,8 @@ impl Store {
                 name: r.get(2)?,
                 icon: r.get(3)?,
                 desktop_id: r.get(4)?,
+                alias: r.get(5)?,
+                ignored: r.get::<_, i64>(6)? != 0,
             })
         });
         let mut out = HashMap::new();
@@ -480,6 +499,69 @@ impl Store {
             }
         }
         out
+    }
+
+    /// Set or clear a user-facing display name. The recorded app identity and
+    /// icon are untouched.
+    pub fn set_app_alias(&self, app_id: i64, alias: Option<&str>) -> Result<(), String> {
+        let alias = alias.map(str::trim).filter(|value| !value.is_empty());
+        self.conn
+            .execute(
+                "UPDATE apps SET alias = ?1 WHERE id = ?2",
+                params![alias, app_id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Hide an app from lists and totals without deleting its history.
+    pub fn set_app_ignored(&self, app_id: i64, ignored: bool) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE apps SET ignored = ?1 WHERE id = ?2",
+                params![if ignored { 1 } else { 0 }, app_id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Apps whose icon reference is missing, for the one-pass startup backfill.
+    pub fn apps_missing_icons(&self) -> Result<Vec<AppInfo>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, key, name, icon_ref, desktop_id, alias, ignored FROM apps\n\
+                 WHERE icon_ref IS NULL OR icon_ref = ''\n\
+                 ORDER BY id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(AppInfo {
+                    id: r.get(0)?,
+                    key: r.get(1)?,
+                    name: r.get(2)?,
+                    icon: r.get(3)?,
+                    desktop_id: r.get(4)?,
+                    alias: r.get(5)?,
+                    ignored: r.get::<_, i64>(6)? != 0,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        Ok(rows)
+    }
+
+    /// Store an icon reference resolved by the desktop index.
+    pub fn set_app_icon(&self, app_id: i64, icon: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE apps SET icon_ref = ?1 WHERE id = ?2",
+                params![icon, app_id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     pub fn has_any_sessions(&self) -> bool {
@@ -752,12 +834,51 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         assert_eq!(store.get_setting("nope"), None);
         store.set_setting("theme", "dark").unwrap();
         drop(store);
         let store = Store::open_at(&dir.db()).unwrap();
         assert_eq!(store.get_setting("theme").as_deref(), Some("dark"));
+    }
+
+    #[test]
+    fn app_aliases_and_ignores_round_trip() {
+        let dir = TempDir::new("aliases");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let id = store.upsert_app(&app("org.example.Editor"), 0).unwrap();
+        let info = store.app_infos(&[id]).remove(&id).unwrap();
+        assert_eq!(info.alias, None);
+        assert!(!info.ignored);
+
+        store.set_app_alias(id, Some("Writing")).unwrap();
+        store.set_app_ignored(id, true).unwrap();
+        let info = store.app_infos(&[id]).remove(&id).unwrap();
+        assert_eq!(info.alias.as_deref(), Some("Writing"));
+        assert!(info.ignored);
+
+        store.set_app_alias(id, Some("   ")).unwrap();
+        store.set_app_ignored(id, false).unwrap();
+        let info = store.app_infos(&[id]).remove(&id).unwrap();
+        assert_eq!(info.alias, None);
+        assert!(!info.ignored);
+    }
+
+    #[test]
+    fn icon_backfill_lists_only_missing_icons() {
+        let dir = TempDir::new("icons");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let first = store.upsert_app(&app("org.example.First"), 0).unwrap();
+        let second = store.upsert_app(&app("org.example.Second"), 0).unwrap();
+        store.set_app_icon(first, "utilities-terminal").unwrap();
+
+        let missing = store.apps_missing_icons().unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].id, second);
+        assert_eq!(missing[0].icon, None);
+
+        store.set_app_icon(second, "web-browser").unwrap();
+        assert!(store.apps_missing_icons().unwrap().is_empty());
     }
 
     #[test]
@@ -813,7 +934,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         // Existing rows become input-backed, and neither the session nor the
         // rollup or app identity is rewritten.
         assert_eq!(store.session_presence(1).as_deref(), Some("input"));
@@ -826,6 +947,14 @@ mod tests {
             vec![(50, 1, 42)]
         );
         assert!(store.app_infos(&[1]).contains_key(&1));
+        let (alias, ignored): (Option<String>, i64) = store
+            .conn
+            .query_row("SELECT alias, ignored FROM apps WHERE id = 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(alias, None);
+        assert_eq!(ignored, 0);
     }
 
     #[test]
@@ -1186,7 +1315,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     #[test]

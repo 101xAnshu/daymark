@@ -446,6 +446,8 @@ impl AppController {
                 name: current.name.clone(),
                 icon: current.icon.clone(),
                 desktop_id: None,
+                alias: None,
+                ignored: false,
             });
         }
         let rollups = day_data.rollups;
