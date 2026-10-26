@@ -82,6 +82,9 @@ pub struct TrackerHandle {
     pub quit: Arc<AtomicBool>,
     reset: Arc<AtomicBool>,
     join: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// Present while the tracker waits on the watch. `unpark` remains the
+    /// fallback when the pipe could not be created.
+    wake_pipe: Arc<Mutex<Option<Arc<WakePipe>>>>,
 }
 
 impl TrackerHandle {
@@ -100,6 +103,7 @@ impl TrackerHandle {
             quit: Arc::new(AtomicBool::new(false)),
             reset: Arc::new(AtomicBool::new(false)),
             join: Arc::new(Mutex::new(None)),
+            wake_pipe: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -122,17 +126,14 @@ impl TrackerHandle {
         }
         if pause_changed {
             // A pause or resume takes effect at once instead of at the next
-            // two-second tick, so no further time is counted after a pause.
+            // event or fallback tick, so no further time is counted after a
+            // pause.
             self.wake();
         }
     }
     pub fn stop(&self) {
         self.quit.store(true, Ordering::Relaxed);
-        if let Ok(slot) = self.join.lock() {
-            if let Some(handle) = slot.as_ref() {
-                handle.thread().unpark();
-            }
-        }
+        self.wake();
     }
     /// Ask the tracker to discard all recorded intervals. It happens on the
     /// tracking thread so an open interval can never be re-created afterwards.
@@ -150,6 +151,11 @@ impl TrackerHandle {
         }
     }
     fn wake(&self) {
+        if let Ok(slot) = self.wake_pipe.lock() {
+            if let Some(pipe) = slot.as_ref() {
+                pipe.wake();
+            }
+        }
         if let Ok(slot) = self.join.lock() {
             if let Some(handle) = slot.as_ref() {
                 handle.thread().unpark();
@@ -307,6 +313,23 @@ fn wait_timeout(watching: bool) -> Duration {
         WATCH_TIMEOUT
     } else {
         FALLBACK_POLL
+    }
+}
+
+/// A monotonic jump larger than the normal watch interval means the machine
+/// slept, or the process was stalled. A wall-clock jump with a small
+/// monotonic delta means the clock was adjusted. Credit neither.
+fn tick_gap(wall_delta: i64, mono_delta: i64) -> bool {
+    (wall_delta - mono_delta).abs() > 5 || mono_delta > TICK_GAP_SECS
+}
+
+/// A tick credits the elapsed monotonic time, capped at one watch interval,
+/// unless a gap made the elapsed time untrustworthy.
+fn credited_seconds(mono_delta: i64, gap: bool) -> i64 {
+    if gap {
+        0
+    } else {
+        mono_delta.clamp(0, MAX_CREDIT_SECS)
     }
 }
 
@@ -756,7 +779,7 @@ impl Tracker {
         let wall_delta = now_wall - self.last_tick_wall;
         // A large wall-clock jump with a small monotonic delta means the
         // machine slept, or the clock was adjusted. Credit neither.
-        let gap = (wall_delta - mono_delta).abs() > 5 || mono_delta > 10;
+        let gap = tick_gap(wall_delta, mono_delta);
         self.last_tick_wall = now_wall;
         self.last_tick_mono = now_mono;
 
@@ -804,7 +827,7 @@ impl Tracker {
             self.maybe_prune();
         }
 
-        let delta = if gap { 0 } else { mono_delta.clamp(0, 5) };
+        let delta = credited_seconds(mono_delta, gap);
 
         let polled = self.reader.poll();
         let Some((state, age)) = polled else {
@@ -952,12 +975,22 @@ impl Tracker {
 }
 
 pub fn spawn(store: Store, settings: Settings) -> TrackerHandle {
+    let wake_pipe = match WakePipe::new() {
+        Ok(pipe) => Some(Arc::new(pipe)),
+        Err(error) => {
+            eprintln!(
+                "daymark: could not create the tracker wake pipe ({error}); using the two-second fallback poll"
+            );
+            None
+        }
+    };
     let handle = TrackerHandle {
         live: Arc::new(Mutex::new(LiveState::default())),
         settings: Arc::new(Mutex::new(settings)),
         quit: Arc::new(AtomicBool::new(false)),
         reset: Arc::new(AtomicBool::new(false)),
         join: Arc::new(Mutex::new(None)),
+        wake_pipe: Arc::new(Mutex::new(wake_pipe.clone())),
     };
     let thread_handle = handle.clone();
     let join_slot = handle.join.clone();
@@ -965,12 +998,34 @@ pub fn spawn(store: Store, settings: Settings) -> TrackerHandle {
         .name("daymark-tracker".into())
         .spawn(move || {
             let mut tracker = Tracker::new(store, thread_handle.clone());
+            let state_path = platform::state_path();
+            let directory = state_path.parent().unwrap_or_else(|| Path::new("."));
+            let mut watch = wake_pipe.map(|pipe| {
+                // A watch on the runtime directory covers both an in-place
+                // write and the temporary-file rename the companion uses for
+                // an atomic replacement.
+                match RuntimeWatch::new(directory, pipe.clone()) {
+                    Ok(watch) => watch,
+                    Err(error) => {
+                        eprintln!(
+                            "daymark: could not watch the runtime directory ({error}); using the two-second fallback poll"
+                        );
+                        RuntimeWatch::without_watch(pipe)
+                    }
+                }
+            });
             while !thread_handle.quit.load(Ordering::Relaxed) {
                 tracker.tick();
-                // Two seconds is forgiving enough for input/idle transitions
-                // while waking the CPU only 30 times a minute. `park_timeout`
-                // is interrupted immediately by `stop()`/`request_reset()`.
-                std::thread::park_timeout(Duration::from_secs(2));
+                match watch.as_mut() {
+                    Some(watch) => {
+                        // An inotify event wakes this at once. The timeout is
+                        // the 30-second safety net for a missed event, or the
+                        // old two-second poll when no watch could be made.
+                        let timeout = watch.timeout();
+                        watch.wait(timeout);
+                    }
+                    None => std::thread::park_timeout(FALLBACK_POLL),
+                }
             }
             if let Some(session) = &tracker.current {
                 let end = session.started + session.accumulated;
