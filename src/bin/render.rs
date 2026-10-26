@@ -21,12 +21,12 @@ use daymark::{AppWindow, Theme};
 fn seed_presence(store: &Store) {
     let today = Day::today();
     let app = ResolvedApp {
-        key: "vlc.desktop".into(),
-        name: "VLC media player".into(),
-        icon: Some("vlc".into()),
-        desktop_id: Some("vlc.desktop".into()),
+        key: "org.example.Player".into(),
+        name: "Media Player".into(),
+        icon: None,
+        desktop_id: None,
         wm_class: None,
-        matched: true,
+        matched: false,
     };
     if let Ok(app_id) = store.upsert_app(&app, today.start_ts()) {
         if let Ok(id) =
