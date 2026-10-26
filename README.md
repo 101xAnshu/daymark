@@ -53,6 +53,7 @@ the process, including after you close it to the background. That costs about
 | You get | You never get |
 | --- | --- |
 | One calm day view — total time, the week's shape, the day's rhythm | Sign-ups, profiles or a subscription |
+| A seven-day rhythm view — a 7×24 heatmap of when the week is busy | Streaks, scores or guilt mechanics |
 | A per-app breakdown with real icons and quiet time bars | Window titles, keystrokes, clipboard data or screenshots |
 | Fourteen days of history at a glance | Cloud sync, analytics, telemetry or any network code |
 | System light/dark that follows GNOME live | A WebView, Electron or Node runtime |
@@ -65,6 +66,10 @@ the process, including after you close it to the background. That costs about
 | ![Dark theme](docs/daymark-dark.png) | ![History](docs/daymark-history.png) | ![Settings](docs/daymark-settings.png) |
 | **Setup** | **First run** | |
 | ![Setup](docs/daymark-setup.png) | ![First run](docs/daymark-first-run.png) | |
+
+<p align="center">
+  <img src="docs/daymark-rhythm.png" width="720" alt="The rhythm view: seven days by hour" />
+</p>
 
 ## Install
 
@@ -165,7 +170,10 @@ To remove a source or archive install:
 ## Use
 
 - Click a day in the weekly chart, or use `←` / `→` to move one day.
-- `T` returns to today; `Ctrl+1` / `Ctrl+2` switch between Day and History.
+- `T` returns to today; `Ctrl+1` / `Ctrl+2` / `Ctrl+3` switch between Day,
+  History and Rhythm.
+- Rhythm shows the last seven days as a 7×24 heatmap: rows are days, columns
+  are hours, and darker means more time.
 - `Ctrl+,` opens Settings. `Ctrl+W` hides the window. `Ctrl+Q` quits.
 - The ✕ control (or Alt+F4) hides Daymark and keeps tracking in the background;
   **Quit Daymark** in Settings really stops it. After the first open the process
@@ -299,8 +307,9 @@ process is low-idle, not zero-wakeup.
 
 ## Verification
 
-- `cargo test --lib`: **69 passed** — date/DST arithmetic and midnight bounds,
-  interval overlap and hourly aggregation, idle-gap exclusion, per-app totals,
+- `cargo test --lib`: **71 passed** — date/DST arithmetic and midnight bounds,
+  interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
+  across midnight, idle-gap exclusion, per-app totals,
   averages, JSON parsing (including the seconds/milliseconds compatibility
   path), desktop-entry parsing (quoted `Exec`, `NoDisplay`, hidden entries),
   shell-window filtering, SQLite persistence, legacy-row migration, corruption

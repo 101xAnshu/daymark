@@ -25,6 +25,12 @@ The product should be reliable, private, native, and easy to install and keep ru
 - The repository is public. The release uses GitHub Actions, Releases, and package links on
   the free plan.
 
+## V2 progress
+
+- The Rhythm view is implemented on `v2`: a 7×24 heatmap for the last seven days,
+  with hour labels, per-day totals, and a legend. The library has **71 tests**.
+- V2 is local only. Nothing on `v2` is pushed until the branch is approved.
+
 ## 1. Executive summary
 
 Daymark already does the core job well. It works on stock GNOME 45 to 50, on Wayland and
@@ -178,10 +184,11 @@ only before this date" state. Add `tz_offset_min` to sessions and use it in day 
 
 ### Tests and measurement
 
-The tree now has 69 tests covering date handling, storage, recovery, migration, pruning,
+The tree now has 71 tests covering date handling, storage, recovery, migration, pruning,
 settings, single instance, tracker behavior, the noise floor and merge, timed pause, log
-rotation, extension selection, the first-run decision, autostart consent, and read-only
-doctor/status output. Some tracker tests still use real sleeps and wall time.
+rotation, extension selection, the first-run decision, autostart consent, seven-day hourly
+heatmap aggregation, and read-only doctor/status output. Some tracker tests still use real
+sleeps and wall time.
 
 The remaining target is a `tick` function that takes `now_wall`, `now_mono`, and state, with
 tests that replay event sequences. Cover switch, blip, merge, idle backdate, audio cap,
@@ -256,7 +263,7 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 
 13. Add a tray with open, pause 15 minutes, pause 1 hour, pause until resumed, and quit.
     The tray icon should show the paused state, and it should reappear when the bar restarts.
-14. Add the 7 by 24 heatmap.
+14. Add the 7 by 24 heatmap. **Implemented on `v2` as the Rhythm view.**
 15. Add the weekly digest notification.
 16. Add the APT-aware update notice.
 17. Write the design token and decision notes, and review animation and transitions.
@@ -339,7 +346,7 @@ These choices are fixed for V1.
   inhibitors.
 - `ui/app.slint` holds the day, week, hourly, history, search, settings, first-run, and
   banner views.
-- The current tree has 69 tests, CI, .deb and .rpm packaging, `doctor`, timed pause, the
-  first-run flow, and the noise floor. It still has no tray.
+- The current tree has 71 tests, CI, .deb and .rpm packaging, `doctor`, timed pause, the
+  first-run flow, the noise floor, and the Rhythm heatmap. It still has no tray.
 - This document is the plan and the review record. Implementation runs on `v1-release`;
   `main` stays untouched.
