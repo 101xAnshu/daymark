@@ -50,6 +50,10 @@ pub struct Settings {
     /// and after the sheet has been shown (or was not needed) on the first
     /// visible launch.
     pub first_run_complete: bool,
+    /// Send one local notification a week with the previous week's totals.
+    pub digest_enabled: bool,
+    /// Start timestamp of the last week end delivered, or 0 when never sent.
+    pub digest_last_sent: i64,
 }
 
 impl Default for Settings {
@@ -62,6 +66,8 @@ impl Default for Settings {
             retention_days: 365,
             theme: ThemePref::System,
             first_run_complete: false,
+            digest_enabled: false,
+            digest_last_sent: 0,
         }
     }
 }
@@ -99,6 +105,15 @@ impl Settings {
         }
         if let Some(v) = store.get_setting("first_run_complete") {
             s.first_run_complete = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Some(v) = store.get_setting("digest_enabled") {
+            s.digest_enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Some(v) = store
+            .get_setting("digest_last_sent")
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            s.digest_last_sent = v.max(0);
         }
         s
     }
@@ -143,6 +158,13 @@ impl Settings {
                     if self.first_run_complete { "1" } else { "0" },
                 )
             })
+            .and_then(|_| {
+                store.set_setting(
+                    "digest_enabled",
+                    if self.digest_enabled { "1" } else { "0" },
+                )
+            })
+            .and_then(|_| store.set_setting("digest_last_sent", &self.digest_last_sent.to_string()))
     }
 }
 
@@ -305,5 +327,26 @@ mod tests {
             store.get_setting("first_run_complete").as_deref(),
             Some("1")
         );
+    }
+
+    #[test]
+    fn the_weekly_digest_preference_round_trips() {
+        let dir = TempDb::new("digest");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let fresh = Settings::load(&store);
+        assert!(!fresh.digest_enabled, "the digest is opt-in");
+        assert_eq!(fresh.digest_last_sent, 0);
+
+        let sent = crate::date::Day::today().start_ts();
+        let enabled = Settings {
+            digest_enabled: true,
+            digest_last_sent: sent,
+            ..Settings::default()
+        };
+        enabled.save(&store).unwrap();
+
+        let reloaded = Settings::load(&store);
+        assert!(reloaded.digest_enabled);
+        assert_eq!(reloaded.digest_last_sent, sent);
     }
 }
