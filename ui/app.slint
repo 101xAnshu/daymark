@@ -128,6 +128,8 @@ export component AppWindow inherits Window {
     in property <[MetricRow]> metrics: [];
     in property <[TimelineSegment]> timeline: [];
     in property <bool> has-timeline: false;
+    // Quiet note under the timeline, e.g. "12m with audio or a video playing".
+    in property <string> presence-note: "";
     in property <[HeatRow]> heatmap: [];
     in property <string> heatmap-total: "";
     in property <bool> has-heatmap: false;
@@ -741,6 +743,14 @@ export component AppWindow inherits Window {
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
+                            }
+                            if (root.presence-note != "") : Text {
+                                height: 18px;
+                                text: "•  " + root.presence-note;
+                                font-size: Theme.micro-size;
+                                color: Theme.text-secondary;
+                                vertical-alignment: center;
+                                overflow: elide;
                             }
                             Rectangle { height: 7px; background: transparent; }
 

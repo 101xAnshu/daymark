@@ -9,7 +9,18 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
+
+/// The only values stored in `sessions.presence`. Anything unrecognised falls
+/// back to input so an older or malformed caller cannot break the journal.
+fn presence_code(value: &str) -> &'static str {
+    match value {
+        "inhibitor" => "inhibitor",
+        "audio" => "audio",
+        "mixed" => "mixed",
+        _ => "input",
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AppInfo {
@@ -205,6 +216,19 @@ impl Store {
             .map_err(|e| format!("could not create the daily totals schema: {e}"))?;
         }
 
+        if version < 4 {
+            // Existing rows were recorded from focus or input, so 'input' is
+            // the honest default. The column is additive: rollups, indexes
+            // and app identity keep working unchanged.
+            conn.execute_batch(
+                "BEGIN;\n\
+                 ALTER TABLE sessions ADD COLUMN presence TEXT NOT NULL DEFAULT 'input';\n\
+                 PRAGMA user_version = 4;\n\
+                 COMMIT;",
+            )
+            .map_err(|e| format!("could not add the presence column: {e}"))?;
+        }
+
         // A crash can leave one open interval. Its end timestamp is the last
         // heartbeat, so the sleeping gap is never credited to the application.
         conn.execute("UPDATE sessions SET is_open = 0 WHERE is_open = 1", [])
@@ -265,14 +289,60 @@ impl Store {
     }
 
     pub fn open_session(&self, app_id: i64, start: i64) -> Result<i64, String> {
+        self.open_session_with_presence(app_id, start, "input")
+    }
+
+    pub fn open_session_with_presence(
+        &self,
+        app_id: i64,
+        start: i64,
+        presence: &str,
+    ) -> Result<i64, String> {
         self.conn
             .execute(
-                "INSERT INTO sessions(app_id, started_at, ended_at, is_open)\n\
-                 VALUES(?1, ?2, ?2, 1)",
-                params![app_id, start],
+                "INSERT INTO sessions(app_id, started_at, ended_at, is_open, presence)\n\
+                 VALUES(?1, ?2, ?2, 1, ?3)",
+                params![app_id, start, presence_code(presence)],
             )
             .map_err(|e| format!("could not start a session: {e}"))?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Upgrade the recorded presence of a session. The tracker uses a
+    /// monotonic merge before calling this, so the value never goes back to
+    /// input for the same row.
+    pub fn set_session_presence(&self, id: i64, presence: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE sessions SET presence = ?1 WHERE id = ?2",
+                params![presence_code(presence), id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn session_presence(&self, id: i64) -> Option<String> {
+        self.conn
+            .query_row("SELECT presence FROM sessions WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .ok()
+    }
+
+    /// Seconds on a day that belong to sessions with audio, inhibitor or mixed
+    /// presence. Raw intervals only; the current live interval is added by the
+    /// interface. A session crossing midnight is clipped to the requested day.
+    pub fn presence_seconds_between(&self, start: i64, end: i64) -> Result<i64, String> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(MIN(ended_at, ?2) - MAX(started_at, ?1)), 0)\n\
+                 FROM sessions\n\
+                 WHERE is_open = 0 AND presence != 'input'\n\
+                   AND ended_at > ?1 AND started_at < ?2",
+                params![start, end],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
     }
 
     pub fn heartbeat_session(&self, id: i64, end: i64) -> Result<(), String> {
@@ -661,11 +731,176 @@ mod tests {
     fn schema_initializes_and_settings_roundtrip() {
         let dir = TempDir::new("init");
         let store = Store::open_at(&dir.db()).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
         assert_eq!(store.get_setting("nope"), None);
         store.set_setting("theme", "dark").unwrap();
         drop(store);
         let store = Store::open_at(&dir.db()).unwrap();
         assert_eq!(store.get_setting("theme").as_deref(), Some("dark"));
+    }
+
+    #[test]
+    fn presence_migration_keeps_sessions_rollups_and_identity() {
+        let dir = TempDir::new("presence-migrate");
+        let path = dir.db();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE apps (\n\
+               id INTEGER PRIMARY KEY,\n\
+               key TEXT NOT NULL UNIQUE,\n\
+               name TEXT NOT NULL,\n\
+               icon_ref TEXT,\n\
+               desktop_id TEXT,\n\
+               wm_class TEXT,\n\
+               first_seen INTEGER NOT NULL,\n\
+               last_seen INTEGER NOT NULL\n\
+             );\n\
+             CREATE TABLE sessions (\n\
+               id INTEGER PRIMARY KEY,\n\
+               app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,\n\
+               started_at INTEGER NOT NULL,\n\
+               ended_at INTEGER NOT NULL,\n\
+               is_open INTEGER NOT NULL DEFAULT 0,\n\
+               source TEXT NOT NULL DEFAULT 'focus',\n\
+               CHECK(ended_at >= started_at)\n\
+             );\n\
+             CREATE UNIQUE INDEX sessions_one_open_idx\n\
+               ON sessions(is_open) WHERE is_open = 1;\n\
+             CREATE TABLE settings (\n\
+               key TEXT PRIMARY KEY,\n\
+               value TEXT NOT NULL\n\
+             );\n\
+             CREATE TABLE daily_app_totals (\n\
+               day_start INTEGER NOT NULL,\n\
+               app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,\n\
+               seconds INTEGER NOT NULL,\n\
+               PRIMARY KEY (day_start, app_id)\n\
+             );\n\
+             INSERT INTO apps(id, key, name, first_seen, last_seen)\n\
+               VALUES(1, 'org.example.Legacy', 'Legacy', 100, 100);\n\
+             INSERT INTO sessions(id, app_id, started_at, ended_at, is_open, source)\n\
+               VALUES(1, 1, 100, 200, 0, 'focus');\n\
+             INSERT INTO daily_app_totals(day_start, app_id, seconds)\n\
+               VALUES(50, 1, 42);\n\
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open_at(&path).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        // Existing rows become input-backed, and neither the session nor the
+        // rollup or app identity is rewritten.
+        assert_eq!(store.session_presence(1).as_deref(), Some("input"));
+        let rows = store.sessions_between(0, 1000).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].started, 100);
+        assert_eq!(rows[0].ended, 200);
+        assert_eq!(
+            store.daily_app_totals_between(0, 1000).unwrap(),
+            vec![(50, 1, 42)]
+        );
+        assert!(store.app_infos(&[1]).contains_key(&1));
+    }
+
+    #[test]
+    fn presence_persists_and_counts_only_non_input_sessions() {
+        let dir = TempDir::new("presence");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let app_id = store
+            .upsert_app(&app("org.example.Player"), today.start_ts())
+            .unwrap();
+        let input_app = store
+            .upsert_app(&app("org.example.Editor"), today.start_ts())
+            .unwrap();
+
+        let audio = store
+            .open_session_with_presence(app_id, today.start_ts() + 3600, "audio")
+            .unwrap();
+        store
+            .close_session(audio, today.start_ts() + 3600 + 12 * 60)
+            .unwrap();
+        let inhibitor = store
+            .open_session_with_presence(app_id, today.start_ts() + 7200, "inhibitor")
+            .unwrap();
+        store
+            .close_session(inhibitor, today.start_ts() + 7200 + 30 * 60)
+            .unwrap();
+        let input = store
+            .open_session(input_app, today.start_ts() + 10800)
+            .unwrap();
+        store
+            .close_session(input, today.start_ts() + 10800 + 3600)
+            .unwrap();
+
+        assert_eq!(store.session_presence(audio).as_deref(), Some("audio"));
+        assert_eq!(
+            store.session_presence(inhibitor).as_deref(),
+            Some("inhibitor")
+        );
+        assert_eq!(store.session_presence(input).as_deref(), Some("input"));
+        assert_eq!(
+            store
+                .presence_seconds_between(today.start_ts(), today.end_ts())
+                .unwrap(),
+            42 * 60
+        );
+
+        // Presence only upgrades, and an open row is not counted twice by the
+        // day query (the interface adds the live interval itself).
+        store.set_session_presence(audio, "mixed").unwrap();
+        assert_eq!(store.session_presence(audio).as_deref(), Some("mixed"));
+        store
+            .open_session_with_presence(app_id, today.start_ts() + 20_000, "audio")
+            .unwrap();
+        assert_eq!(
+            store
+                .presence_seconds_between(today.start_ts(), today.end_ts())
+                .unwrap(),
+            42 * 60
+        );
+        assert_eq!(
+            store
+                .presence_seconds_between(today.add_days(1).start_ts(), today.add_days(1).end_ts())
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn presence_seconds_are_clipped_to_the_day() {
+        let dir = TempDir::new("presence-midnight");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let yesterday = today.add_days(-1);
+        let app_id = store.upsert_app(&app("a"), yesterday.start_ts()).unwrap();
+        let session = store
+            .open_session_with_presence(app_id, yesterday.start_ts() + 23 * 3600 + 1800, "audio")
+            .unwrap();
+        store
+            .close_session(session, today.start_ts() + 1800)
+            .unwrap();
+        assert_eq!(
+            store
+                .presence_seconds_between(yesterday.start_ts(), yesterday.end_ts())
+                .unwrap(),
+            1800
+        );
+        assert_eq!(
+            store
+                .presence_seconds_between(today.start_ts(), today.end_ts())
+                .unwrap(),
+            1800
+        );
     }
 
     #[test]
@@ -902,7 +1137,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]

@@ -28,7 +28,7 @@ The product should be reliable, private, native, and easy to install and keep ru
 ## V2 progress
 
 - The Rhythm view is implemented on `v2`: a 7×24 heatmap for the last seven days,
-  with hour labels, per-day totals, and a legend. The library has **97 tests**.
+  with hour labels, per-day totals, and a legend. The library has **114 tests**.
 - The Day view now has a metrics row and a 24-hour timeline on `v2`. The metrics row
   reports the longest uninterrupted stretch, distinct apps, time after midnight
   (00:00–05:00), the change from the same weekday last week, and a live Now cell for
@@ -43,6 +43,12 @@ The product should be reliable, private, native, and easy to install and keep ru
   option, a CI job cross-builds the arm64 `.deb` and aarch64 `.rpm` with cargo-zigbuild, and
   the same job install-tests both under QEMU. The free plan has no native arm64 runners, so
   the packages are not built on arm64 hardware and a live arm64 run is still a separate check.
+- Audio and inhibitor presence is capped on `v2`. The companion reports `idle_ms`, whether
+  an idle inhibitor is active, and whether a session-bus MPRIS player is `Playing`. A
+  session whose only presence is audio or an inhibitor closes at the last input plus two
+  hours; the cap latches until input returns. Schema v4 adds `sessions.presence`
+  (`input`, `inhibitor`, `audio` or `mixed`) without changing rollups or app identity, and
+  the Day view shows a quiet presence note under the timeline.
 - V2 is local only. Nothing on `v2` is pushed until the branch is approved.
 
 ## 1. Executive summary
@@ -191,6 +197,8 @@ ignore fields, and a share percentage in the app list.
 
 Today, Daymark has a calm day view with a metrics row, a 24-hour session timeline,
 7 day bars, a by-hour chart, an app list, a 14 day history, and a 7×24 rhythm view.
+A quiet note under the timeline reports time with audio or an inhibitor when present,
+without adding another metric cell at the 900 px minimum width.
 
 The heatmap shipped first; the metrics row and day timeline follow it. Keep the calm
 visual language. Do not turn the timeline into hundreds of tiny segments.
@@ -204,17 +212,19 @@ only before this date" state. Add `tz_offset_min` to sessions and use it in day 
 
 ### Tests and measurement
 
-The tree now has 93 tests covering date handling, storage, recovery, migration, pruning,
+The tree now has 108 tests covering date handling, storage, recovery, migration, pruning,
 daily rollup preservation, settings, single instance, tracker behavior, the inotify watch
 and fallback, the noise floor and merge, timed pause, log rotation, extension selection,
 the first-run decision, autostart consent, seven-day hourly heatmap aggregation, day
-metrics and timeline segmentation across midnight and idle gaps, and read-only
-doctor/status output. Some tracker tests still use real sleeps and wall time.
+metrics and timeline segmentation across midnight and idle gaps, idle_ms parsing, the
+two-hour presence boundary, input return, lock and idle precedence, presence persistence
+and the v3 to v4 migration, and read-only doctor/status output. Some tracker tests still
+use real sleeps and wall time.
 
 The remaining target is a `tick` function that takes `now_wall`, `now_mono`, and state, with
-tests that replay event sequences. Cover switch, blip, merge, idle backdate, audio cap,
-suspend, clock jump, pause, midnight, stale, and recovery. `scripts/measure.sh` now exists
-and the README publishes headless and hidden-after-close numbers.
+tests that replay event sequences. Cover switch, blip, merge, idle backdate, suspend,
+clock jump, pause, midnight, stale, and recovery. `scripts/measure.sh` now exists and the
+README publishes headless and hidden-after-close numbers.
 
 ## 5. What to keep
 
@@ -275,6 +285,8 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 7. Add an inotify state watch with a 30 second fallback. **Implemented on `v2`.**
 8. Cap audio and inhibitor-only presence at 2 hours from the last input. Add a presence
    flag that records whether time came from input or audio playback, and show it in the UI.
+   **Implemented on `v2`: schema v4 stores input, inhibitor, audio or mixed, the cap
+   latches until input returns, and the Day view shows a quiet note.**
 9. Add the day timeline and metrics row. **Implemented on `v2`.**
 10. Add aliases, ignore, share percentage, and icon backfill.
 11. Add retention rollup and per-row timezone offset. **Retention rollup store layer
@@ -369,13 +381,13 @@ These choices are fixed for V1.
 - `src/platform.rs` handles autostart and extension install, preferring the packaged
   system-wide copy.
 - `src/instance.rs` holds the show and quit socket.
-- `extension/extension.js` reports focus, idle, shield, and sleep state and queries idle
-  inhibitors.
-- `ui/app.slint` holds the day metrics row, 24-hour timeline, week, hourly, history,
-  search, settings, first-run, and banner views.
-- The current tree has 97 tests, CI, amd64 and arm64 `.deb` packaging, x86_64 and aarch64
+- `extension/extension.js` reports focus, idle, shield, sleep, idle milliseconds, idle
+  inhibitors, and session-bus MPRIS playback.
+- `ui/app.slint` holds the day metrics row, 24-hour timeline, presence note, week, hourly,
+  history, search, settings, first-run, and banner views.
+- The current tree has 114 tests, CI, amd64 and arm64 `.deb` packaging, x86_64 and aarch64
   `.rpm` packaging, `doctor`, timed pause, the first-run flow, the noise floor, the Rhythm
-  heatmap, the inotify watch, the day metrics and timeline, and the weekly digest
-  computation. It still has no tray.
+  heatmap, the inotify watch, the day metrics and timeline, the audio/inhibitor presence
+  cap, and the weekly digest computation and transport. It still has no tray.
 - This document is the plan and the review record. V1 is merged on `main`; V2 runs on
   `v2`.
