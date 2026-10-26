@@ -80,6 +80,10 @@ export component AppWindow inherits Window {
     in property <string> banner-action: "";
     in property <int> banner-kind: 0; // 0 setup, 1 resume, 2 retry, 3 details
     in property <bool> paused: false;
+    // Seconds left on a timed pause (0 when there is none) and the matching
+    // one-line status, e.g. "Paused — 14m remaining".
+    in property <int> pause-remaining: 0;
+    in property <string> pause-status: "";
     in property <bool> settings-open: false;
     in property <bool> setup-open: false;
     in property <bool> setup-ready: false;
@@ -113,7 +117,8 @@ export component AppWindow inherits Window {
     callback set-retention(int);
     callback set-theme(int);
     callback set-autostart(bool);
-    callback set-paused(bool);
+    // Pause for the given number of seconds; 0 pauses until resumed.
+    callback pause-for(int);
     callback search-changed(string);
     callback open-data();
     callback delete-all();
@@ -1276,15 +1281,45 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             alignment: center;
                             PrimaryButton {
-                                label: root.setup-busy ? "Setting up…" : (root.tracking-code == 3 || root.tracking-code == 4 || root.tracking-code == 5 ? "Set up" : root.paused ? "Resume" : "Pause");
+                                label: root.setup-busy ? "Setting up…" : (root.tracking-code == 3 || root.tracking-code == 4 || root.tracking-code == 5 ? "Set up" : "Resume");
+                                visible: root.setup-busy || root.tracking-code == 3 || root.tracking-code == 4 || root.tracking-code == 5 || root.paused;
                                 enabled: !root.setup-busy;
                                 clicked => {
                                     if (root.tracking-code == 3 || root.tracking-code == 4 || root.tracking-code == 5) { root.setup-tracking(); }
-                                    else if (root.paused) { root.resume-tracking(); }
-                                    else { root.set-paused(true); }
+                                    else { root.resume-tracking(); }
                                 }
                             }
                         }
+                    }
+                }
+
+                // Pause options: a timed pause ends on its own at its
+                // deadline, an open pause ends at the next app start.
+                Rectangle { height: 10px; background: transparent; }
+                Text {
+                    text: root.pause-status;
+                    font-size: Theme.small-size;
+                    color: Theme.text-secondary;
+                    wrap: word-wrap;
+                    visible: root.paused;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    visible: !root.paused && root.tracking-code != 3 && root.tracking-code != 4 && root.tracking-code != 5;
+                    Chip {
+                        label: "15 minutes";
+                        horizontal-stretch: 1;
+                        clicked => { root.pause-for(900); }
+                    }
+                    Chip {
+                        label: "1 hour";
+                        horizontal-stretch: 1;
+                        clicked => { root.pause-for(3600); }
+                    }
+                    Chip {
+                        label: "Until resumed";
+                        horizontal-stretch: 1;
+                        clicked => { root.pause-for(0); }
                     }
                 }
 
