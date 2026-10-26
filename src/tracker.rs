@@ -1089,6 +1089,25 @@ impl Tracker {
                 presence,
                 capped_at,
             } => {
+                let mut presence_error = None;
+                if let Some(session) = &mut self.current {
+                    let merged = session.presence.merge(presence);
+                    if merged != session.presence {
+                        session.presence = merged;
+                        if let Err(e) = self
+                            .store
+                            .set_session_presence(session.db_id, merged.code())
+                        {
+                            presence_error = Some(e);
+                        }
+                    }
+                }
+                if let Some(e) = presence_error {
+                    self.set_status(
+                        TrackingStatus::Error,
+                        format!("Could not update presence: {e}"),
+                    );
+                }
                 if self.current.is_some() {
                     self.close_current(capped_at, false);
                 }
@@ -1762,14 +1781,12 @@ mod tests {
     }
 
     #[test]
-    fn audio_closes_at_the_cap_and_waits_for_input() {
-        let dir = TempDir::new("audio-cap");
+    fn recent_input_marks_an_open_session_with_audio_presence() {
+        let dir = TempDir::new("audio-mark");
         let mut tracker = make_tracker(&dir);
         let now = date::unix_now();
-        open_fake(&mut tracker, "app:org.example.video", now - 4 * 3600);
+        open_fake(&mut tracker, "app:org.example.video", now - 60);
         let db_id = tracker.current.as_ref().unwrap().db_id;
-
-        // A prior tick with recent input marks the open row as audio-backed.
         write_presence_state(
             &dir.state_path(),
             1,
@@ -1787,12 +1804,23 @@ mod tests {
             tracker.store.session_presence(db_id).as_deref(),
             Some("audio")
         );
+        assert_eq!(tracker.last_status, TrackingStatus::Active);
+    }
 
-        // Three hours without input: the row must end at last input + 2h.
+    #[test]
+    fn audio_closes_at_the_cap_and_waits_for_input() {
+        let dir = TempDir::new("audio-cap");
+        let mut tracker = make_tracker(&dir);
+        let now = date::unix_now();
+        open_fake(&mut tracker, "app:org.example.video", now - 4 * 3600);
+        let db_id = tracker.current.as_ref().unwrap().db_id;
+
+        // Three hours without input: the row must end at last input + 2h and
+        // still record the audio presence that reached the cap.
         let state_now = date::unix_now();
         write_presence_state(
             &dir.state_path(),
-            2,
+            1,
             Some(("org.example.Video", "Video")),
             false,
             0,
