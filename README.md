@@ -74,17 +74,24 @@ the process, including after you close it to the background. That costs about
 ## Install
 
 Daymark targets **Ubuntu 24.04+** (GNOME 46+) and **Fedora 42+** (GNOME 48+).
-It has been tested on Ubuntu 26.04 with GNOME Shell 50.1, and the packages are
-built for amd64/x86_64. The `.deb` is built on Ubuntu 22.04 for the glibc 2.35
-floor; Ubuntu 22.04 itself is not a supported runtime because it ships GNOME 42.
-The build includes both the Wayland and X11 window backends.
+It has been tested on Ubuntu 26.04 with GNOME Shell 50.1. Packages are built
+for amd64/x86_64 on Ubuntu 22.04, and the arm64/aarch64 packages are
+cross-built from the same amd64 build environment. The `.deb` keeps the
+glibc 2.35 floor; Ubuntu 22.04 itself is not a supported runtime because it
+ships GNOME 42. The build includes both the Wayland and X11 window backends.
+
+The arm64/aarch64 packages come from cross-compilation on an amd64 runner
+because the free CI plan has no native arm64 runners. CI installs them under
+QEMU for a smoke test. That covers packaging and startup, but a live run on
+real arm64 hardware still needs a separate check.
 
 ### Ubuntu package
 
 Ubuntu 24.04 or newer with GNOME 46 or newer is required. Ubuntu 22.04 ships
 GNOME 42, which the companion does not support.
 
-Download `daymark_<version>_amd64.deb` from the latest release and install it:
+Download `daymark_<version>_amd64.deb` for x86_64 or
+`daymark_<version>_arm64.deb` for arm64 from the latest release and install it:
 
 ```bash
 sudo apt install ./daymark_0.1.1_amd64.deb
@@ -93,7 +100,9 @@ sudo apt install ./daymark_0.1.1_amd64.deb
 ### Fedora package
 
 Fedora 42 or newer with GNOME 48 or newer is required. Download
-`daymark-<version>-1.x86_64.rpm` from the latest release and install it:
+`daymark-<version>-1.x86_64.rpm` for x86_64 or
+`daymark-<version>-1.aarch64.rpm` for arm64 from the latest release and
+install it:
 
 ```bash
 sudo dnf install ./daymark-*.rpm
@@ -107,6 +116,10 @@ your home directory, so package upgrades apply to every user on their own.
 The packages start no service and change no user settings at install time.
 Remove one with `sudo apt remove daymark` or `sudo dnf remove daymark`;
 recorded history is kept in your home directory.
+
+The package scripts default to the host architecture. Pass `--arch arm64` to
+`scripts/build-deb.sh` or `--arch aarch64` to `scripts/build-rpm.sh` for the
+cross build; it needs cargo-zigbuild and Zig.
 
 ### From source
 
@@ -127,7 +140,7 @@ unless you pass `--no-build`.
 
 The release also includes `daymark-<version>-x86_64-linux.tar.gz` for systems
 where a package cannot be used. It contains the release binary and
-`install.sh`:
+`install.sh`. The portable archive is x86_64 only; use a package for arm64:
 
 ```bash
 tar -xzf daymark-0.1.1-x86_64-linux.tar.gz

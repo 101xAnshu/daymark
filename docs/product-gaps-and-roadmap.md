@@ -31,6 +31,10 @@ The product should be reliable, private, native, and easy to install and keep ru
   with hour labels, per-day totals, and a legend. The library has **71 tests**.
 - The optional systemd user unit is implemented on `v2`: packages install it, but do not
   enable it. The decision log is in `docs/v2-decisions.md`.
+- arm64/aarch64 packages are implemented on `v2`: both package scripts take an architecture
+  option, a CI job cross-builds the arm64 `.deb` and aarch64 `.rpm` with cargo-zigbuild, and
+  the same job install-tests both under QEMU. The free plan has no native arm64 runners, so
+  the packages are not built on arm64 hardware and a live arm64 run is still a separate check.
 - V2 is local only. Nothing on `v2` is pushed until the branch is approved.
 
 ## 1. Executive summary
@@ -161,6 +165,12 @@ workflow creates a draft release and runs `shellcheck`, `cargo fmt --check`,
 `cargo clippy -D warnings`, and `cargo test`. CI passes; the release workflow still needs a
 release tag.
 
+V2 adds arm64 and aarch64 coverage without an arm64 runner. The package scripts accept
+`--arch`, and CI cross-builds the arm64 packages with cargo-zigbuild, checks their
+architecture, and installs them under QEMU. The free plan has no native arm64 runners, so
+the cross build is the only build path; real-hardware installation and runtime behavior
+remain unverified until an arm64 machine or a paid runner is available.
+
 ### App identity and icons
 
 Today, the Shell app id is strong on GNOME, but a window-backed Electron or web app can
@@ -270,7 +280,9 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 16. Add the APT-aware update notice.
 17. Write the design token and decision notes, and review animation and transitions.
 18. Add an optional systemd user unit with `Restart=on-failure`. **Implemented on `v2`.**
-19. Build arm64 .deb and .rpm packages.
+19. Build arm64 .deb and .rpm packages. **Implemented on `v2` as cross-built packages from
+    amd64 CI, with QEMU install smoke tests. The free plan has no native arm64 runners, so a
+    real-arm64 check is still pending.**
 
 ### P3 and V3
 
@@ -332,6 +344,9 @@ These choices are fixed for V1.
    open-ended pause resumes at the next app start, which is the next login when autostart
    is on.
 8. Implementation runs on `v1-release`. `main` stays untouched.
+9. arm64 `.deb` and aarch64 `.rpm` packages are cross-built from amd64 runners. The free
+   plan has no native arm64 runners, so CI uses QEMU for install smoke tests and a
+   real-arm64 run stays a separate check.
 
 ## 11. Evidence notes
 
@@ -348,7 +363,8 @@ These choices are fixed for V1.
   inhibitors.
 - `ui/app.slint` holds the day, week, hourly, history, search, settings, first-run, and
   banner views.
-- The current tree has 71 tests, CI, .deb and .rpm packaging, `doctor`, timed pause, the
-  first-run flow, the noise floor, and the Rhythm heatmap. It still has no tray.
+- The current tree has 71 tests, CI, amd64 and arm64 .deb packaging, x86_64 and aarch64
+  .rpm packaging, `doctor`, timed pause, the first-run flow, the noise floor, and the
+  Rhythm heatmap. It still has no tray.
 - This document is the plan and the review record. Implementation runs on `v1-release`;
   `main` stays untouched.
