@@ -88,9 +88,13 @@ sudo dnf install ./daymark-*.rpm
 ```
 
 Both packages install the binary in `/usr/bin/daymark` together with the
-desktop entry, icon and GNOME Shell companion. They start no service and change
-no user settings. Remove one with `sudo apt remove daymark` or
-`sudo dnf remove daymark`; recorded history is kept in your home directory.
+desktop entry, icon and GNOME Shell companion. The companion ships
+system-wide at `/usr/share/gnome-shell/extensions/daymark@daymark.app`; the
+app enables that copy for your user and never copies extension files into
+your home directory, so package upgrades apply to every user on their own.
+The packages start no service and change no user settings at install time.
+Remove one with `sudo apt remove daymark` or `sudo dnf remove daymark`;
+recorded history is kept in your home directory.
 
 ### From source
 
@@ -101,8 +105,11 @@ cd daymark
 ```
 
 No root is needed. The installer puts the binary in `~/.local/bin`, adds the
-desktop entry and icon, enables autostart, and installs and enables the small
-GNOME companion. It builds from source unless you pass `--no-build`.
+desktop entry and icon, enables autostart, and installs the small GNOME
+companion into your user extension folder (`~/.local/share/gnome-shell/
+extensions`) — the app enables whichever copy exists, preferring the
+system-wide one when a package provided it. `install.sh` builds from source
+unless you pass `--no-build`.
 
 ### Portable archive (fallback)
 
@@ -119,6 +126,22 @@ cd daymark-0.1.1
 **The first install needs one sign-out and sign-in.** GNOME on Wayland only scans
 for new Shell extensions at login; Daymark's setup sheet explains this and the
 extension begins reporting on the next login.
+
+### First run
+
+The first time the Daymark window opens after installing, the setup sheet
+appears on its own — once. It shows what was set up, explains the one
+sign-out/sign-in, and offers a **Start at login** toggle that is applied when
+you change it. The rest of the app stays usable behind the sheet, and the
+sheet never nags again: the first run is remembered whether or not you finish
+setup in that session. If tracking is already fully working on the first
+launch, nothing opens at all.
+
+Daymark enables autostart by default so tracking survives a reboot. If you
+(or a startup tool) switched it off in the autostart entry itself with
+`X-GNOME-Autostart-enabled=false` or `Hidden=true`, Daymark respects that
+choice and never switches it back on at launch; turning the toggle on again
+in Settings is a deliberate act and re-enables it.
 
 To remove a source or archive install:
 
@@ -258,13 +281,16 @@ open Daymark from the application grid.
 
 ## Verification
 
-- `cargo test --lib`: **52 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **58 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, idle-gap exclusion, per-app totals,
   averages, JSON parsing (including the seconds/milliseconds compatibility
   path), desktop-entry parsing (quoted `Exec`, `NoDisplay`, hidden entries),
   shell-window filtering, SQLite persistence, legacy-row migration, corruption
   recovery, crash recovery, at-most-one-open-session, pruning, settings, single
-  instance, tracker focus/pause/idle behavior, log rotation, and read-only
+  instance, tracker focus/pause/idle behavior, log rotation, extension copy
+  selection (system-wide preferred, user folder as fallback), the first-run
+  decision, autostart-entry consent parsing (a deliberately disabled entry is
+  left alone), and read-only
   doctor/status formatting against a temporary database with its write
   connection still open.
 - The release binary was run on a live GNOME 50.1 Wayland session. The window
