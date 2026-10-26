@@ -22,8 +22,9 @@ EOF
 }
 
 uninstall_extension() {
-    command -v gnome-extensions >/dev/null 2>&1 && \
+    if command -v gnome-extensions >/dev/null 2>&1; then
         gnome-extensions disable "${EXT_UUID}" >/dev/null 2>&1 || true
+    fi
     if command -v gsettings >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
         python3 - "${EXT_UUID}" <<'PY' >/dev/null 2>&1 || true
 import ast
@@ -140,8 +141,12 @@ EOF
 if command -v desktop-file-validate >/dev/null 2>&1; then
     desktop-file-validate "${APP_DIR}/daymark.desktop" || true
 fi
-command -v update-desktop-database >/dev/null 2>&1 &&     update-desktop-database "${APP_DIR}" >/dev/null 2>&1 || true
-command -v gtk-update-icon-cache >/dev/null 2>&1 &&     gtk-update-icon-cache -q -t -f "${HOME}/.local/share/icons/hicolor" >/dev/null 2>&1 || true
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "${APP_DIR}" >/dev/null 2>&1 || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f "${HOME}/.local/share/icons/hicolor" >/dev/null 2>&1 || true
+fi
 
 # Install and enable the small GNOME companion. A first install is picked up at
 # the next login on Wayland; the app explains this in its setup sheet.
