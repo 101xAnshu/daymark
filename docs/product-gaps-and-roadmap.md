@@ -28,7 +28,7 @@ The product should be reliable, private, native, and easy to install and keep ru
 ## V2 progress
 
 - The Rhythm view is implemented on `v2`: a 7×24 heatmap for the last seven days,
-  with hour labels, per-day totals, and a legend. The library has **107 tests**.
+  with hour labels, per-day totals, and a legend. The library has **108 tests**.
 - The Day view now has a metrics row and a 24-hour timeline on `v2`. The metrics row
   reports the longest uninterrupted stretch, distinct apps, time after midnight
   (00:00–05:00), the change from the same weekday last week, and a live Now cell for
@@ -202,7 +202,7 @@ only before this date" state. Add `tz_offset_min` to sessions and use it in day 
 
 ### Tests and measurement
 
-The tree now has 107 tests covering date handling, storage, recovery, migration, pruning,
+The tree now has 108 tests covering date handling, storage, recovery, migration, pruning,
 daily rollup preservation, settings, single instance, tracker behavior, the inotify watch
 and fallback, the noise floor and merge, timed pause, log rotation, extension selection,
 the first-run decision, autostart consent, seven-day hourly heatmap aggregation, day
