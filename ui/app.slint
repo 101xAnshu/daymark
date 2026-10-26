@@ -171,8 +171,10 @@ export component AppWindow inherits Window {
     in property <int> retention-days: 365;
     in property <int> theme-pref: 0;
     in property <bool> autostart: false;
+    in property <bool> digest-enabled: false;
     in property <string> settings-error: "";
     in property <string> app-version: "0.1.1";
+    in property <string> update-notice: "";
     in property <bool> recovered: false;
     in-out property <bool> maximized: false;
     in-out property <bool> header-dragging: false;
@@ -195,6 +197,7 @@ export component AppWindow inherits Window {
     callback set-retention(int);
     callback set-theme(int);
     callback set-autostart(bool);
+    callback set-digest-enabled(bool);
     // Pause for the given number of seconds; 0 pauses until resumed.
     callback pause-for(int);
     callback search-changed(string);
@@ -1890,6 +1893,29 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle { height: 6px; background: transparent; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 1px;
+                        Text {
+                            text: "Weekly digest";
+                            font-size: Theme.body-size;
+                            color: Theme.text;
+                        }
+                        Text {
+                            text: "one local notification each Monday";
+                            font-size: Theme.micro-size;
+                            color: Theme.text-tertiary;
+                        }
+                    }
+                    Switch {
+                        checked: root.digest-enabled;
+                        toggled(v) => { root.set-digest-enabled(v); }
+                    }
+                }
+
+                Rectangle { height: 6px; background: transparent; }
                 data-row := Rectangle {
                     height: 32px;
                     border-radius: 7px;
@@ -1972,6 +1998,14 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                }
+
+                if (root.update-notice != "") : Text {
+                    text: root.update-notice;
+                    font-size: Theme.micro-size;
+                    color: Theme.accent-text;
+                    wrap: word-wrap;
+                    height: max(18px, self.preferred-height);
                 }
 
                 Hairline { }

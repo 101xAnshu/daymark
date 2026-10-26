@@ -258,6 +258,8 @@ pub struct AppController {
     /// Seconds left on the current timed pause, or 0 when there is none.
     pause_remaining: i64,
     last_pause_status: String,
+    /// A local APT update notice, empty when no newer candidate exists.
+    update_notice: String,
 }
 
 impl AppController {
@@ -284,6 +286,14 @@ impl AppController {
         } else {
             String::new()
         };
+        let update_notice = crate::update::available_update()
+            .map(|update| {
+                format!(
+                    "Daymark {} is available. Update with your package manager.",
+                    update.candidate
+                )
+            })
+            .unwrap_or_default();
         let controller = Rc::new(RefCell::new(Self {
             ui,
             store,
@@ -318,6 +328,7 @@ impl AppController {
             window_hidden: false,
             pause_remaining: 0,
             last_pause_status: String::new(),
+            update_notice,
         }));
 
         if let Some(icon) = search_icon() {
@@ -346,6 +357,8 @@ impl AppController {
             .set_retention_days(self.settings.retention_days as i32);
         self.ui.set_theme_pref(self.settings.theme.index());
         self.ui.set_autostart(self.settings.autostart);
+        self.ui.set_digest_enabled(self.settings.digest_enabled);
+        self.ui.set_update_notice(self.update_notice.clone().into());
         self.ui
             .set_settings_error(self.settings_error.clone().into());
         self.ui.set_setup_ready(self.setup_ready);
@@ -1155,6 +1168,32 @@ impl AppController {
                 ctl.force_refresh = true;
                 ctl.refresh();
             });
+        }
+        {
+            let c = controller.clone();
+            controller
+                .borrow()
+                .ui
+                .on_set_digest_enabled(move |enabled| {
+                    let mut ctl = c.borrow_mut();
+                    ctl.settings.digest_enabled = enabled;
+                    if enabled {
+                        if let Some(store) = &ctl.store {
+                            let mut settings = ctl.settings.clone();
+                            match crate::digest::deliver_if_due(store, &mut settings, Day::today())
+                            {
+                                Ok(true) => {
+                                    ctl.settings.digest_last_sent = settings.digest_last_sent;
+                                }
+                                Ok(false) => {}
+                                Err(error) => logging::error("digest", &error),
+                            }
+                        }
+                    }
+                    ctl.save_settings();
+                    ctl.force_refresh = true;
+                    ctl.refresh();
+                });
         }
         {
             let c = controller.clone();

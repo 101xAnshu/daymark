@@ -171,6 +171,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "timeline-empty" => ctl.set_selected_for_render(-9),
             "now" => {}
             "settings" | "dark-settings" | "light-settings" => ctl.open_settings_for_render(),
+            "update" => {
+                ctl.open_settings_for_render();
+                ctl.ui.set_update_notice(
+                    "Daymark 0.1.2 is available. Update with your package manager.".into(),
+                );
+            }
             "delete" => {
                 ctl.open_settings_for_render();
                 ctl.ui.set_confirm_delete(true);
