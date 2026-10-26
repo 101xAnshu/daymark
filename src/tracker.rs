@@ -1079,6 +1079,124 @@ mod tests {
         assert!(parse_state(r#"{"v":0}"#).is_none());
     }
 
+    #[test]
+    fn wait_decision_distinguishes_events_from_timeouts() {
+        assert_eq!(wait_outcome(1), WaitOutcome::Event);
+        assert_eq!(wait_outcome(2), WaitOutcome::Event);
+        assert_eq!(wait_outcome(0), WaitOutcome::Timeout);
+        assert_eq!(wait_outcome(-1), WaitOutcome::Timeout);
+    }
+
+    #[test]
+    fn the_watch_waits_longer_than_the_fallback() {
+        assert_eq!(wait_timeout(true), Duration::from_secs(30));
+        assert_eq!(wait_timeout(false), Duration::from_secs(2));
+        assert!(wait_timeout(true) > wait_timeout(false));
+    }
+
+    #[test]
+    fn the_watch_covers_replacement_and_deletion() {
+        for event in [
+            WatchMask::CLOSE_WRITE,
+            WatchMask::MOVED_TO,
+            WatchMask::CREATE,
+            WatchMask::DELETE,
+            WatchMask::ATTRIB,
+        ] {
+            assert!(WATCH_MASK.contains(event), "missing {event:?}");
+        }
+    }
+
+    #[test]
+    fn a_heartbeat_interval_is_credited_in_full() {
+        // The companion sends a heartbeat every 15 seconds, so a tick may be
+        // that far apart without being treated as a stall.
+        assert!(!tick_gap(15, 15));
+        assert_eq!(credited_seconds(15, false), 15);
+        assert!(!tick_gap(30, 30));
+        assert_eq!(credited_seconds(30, false), 30);
+        // A late tick is capped at one watch interval.
+        assert_eq!(credited_seconds(45, false), MAX_CREDIT_SECS);
+        // A stalled process or a sleeping machine earns no credit.
+        assert!(tick_gap(36, 36));
+        assert!(tick_gap(3600, 5));
+        assert!(tick_gap(5, 3600));
+        assert_eq!(credited_seconds(45, true), 0);
+    }
+
+    #[test]
+    fn a_real_watch_wakes_on_a_state_file_write() {
+        let dir = TempDir::new("watch-write");
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let mut watch = RuntimeWatch::new(&dir.0, wake).unwrap();
+        assert_eq!(watch.timeout(), WATCH_TIMEOUT);
+        write_state(
+            &dir.state_path(),
+            1,
+            Some(("org.example.Alpha", "Alpha")),
+            false,
+            0,
+        );
+        assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
+        // With no further change the watch falls through to its timeout.
+        assert_eq!(
+            watch.wait(Duration::from_millis(150)),
+            WaitOutcome::Timeout
+        );
+    }
+
+    #[test]
+    fn a_real_watch_wakes_on_atomic_replacement_and_deletion() {
+        let dir = TempDir::new("watch-replace");
+        std::fs::write(dir.state_path(), "{}").unwrap();
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let mut watch = RuntimeWatch::new(&dir.0, wake).unwrap();
+        let temporary = dir.0.join("state.json.tmp");
+        std::fs::write(&temporary, "{}").unwrap();
+        std::fs::rename(&temporary, dir.state_path()).unwrap();
+        assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
+        std::fs::remove_file(dir.state_path()).unwrap();
+        assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
+    }
+
+    #[test]
+    fn the_wake_pipe_interrupts_a_long_wait() {
+        let dir = TempDir::new("watch-wake");
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let mut watch = RuntimeWatch::new(&dir.0, wake.clone()).unwrap();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            wake.wake();
+        });
+        assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_wake_pipe_alone_uses_the_fallback_timeout() {
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let mut watch = RuntimeWatch::without_watch(wake.clone());
+        assert_eq!(watch.timeout(), FALLBACK_POLL);
+        let timeout = watch.timeout();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            wake.wake();
+        });
+        assert_eq!(watch.wait(timeout), WaitOutcome::Event);
+        assert!(started.elapsed() < FALLBACK_POLL);
+    }
+
+    #[test]
+    fn an_unwatchable_path_reports_an_error() {
+        let dir = TempDir::new("watch-error");
+        let file = dir.0.join("plain-file");
+        std::fs::write(&file, "").unwrap();
+        let wake = Arc::new(WakePipe::new().unwrap());
+        assert!(RuntimeWatch::new(&file.join("runtime"), wake).is_err());
+    }
+
     struct TempDir(std::path::PathBuf);
     impl TempDir {
         fn new(tag: &str) -> Self {
