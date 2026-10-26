@@ -65,9 +65,34 @@ to do.
 
 ## Install
 
-Daymark targets **Ubuntu with GNOME 45–50** and has been tested on Ubuntu 26.04
-with GNOME Shell 50.1. The build includes both the Wayland and X11 window
+Daymark targets **Ubuntu 22.04+** and **Fedora 42+**, both with GNOME 45–50. It
+has been tested on Ubuntu 26.04 with GNOME Shell 50.1, and the packages are
+built for amd64/x86_64. The build includes both the Wayland and X11 window
 backends.
+
+### Ubuntu package
+
+Download `daymark_<version>_amd64.deb` from the latest release and install it:
+
+```bash
+sudo apt install ./daymark_0.1.1_amd64.deb
+```
+
+### Fedora package
+
+Fedora 42 or newer with GNOME 45–50 is required. Download
+`daymark-<version>-1.x86_64.rpm` from the latest release and install it:
+
+```bash
+sudo dnf install ./daymark-*.rpm
+```
+
+Both packages install the binary in `/usr/bin/daymark` together with the
+desktop entry, icon and GNOME Shell companion. They start no service and change
+no user settings. Remove one with `sudo apt remove daymark` or
+`sudo dnf remove daymark`; recorded history is kept in your home directory.
+
+### From source
 
 ```bash
 git clone https://github.com/101xAnshu/daymark.git
@@ -79,11 +104,23 @@ No root is needed. The installer puts the binary in `~/.local/bin`, adds the
 desktop entry and icon, enables autostart, and installs and enables the small
 GNOME companion. It builds from source unless you pass `--no-build`.
 
+### Portable archive (fallback)
+
+The release also includes `daymark-<version>-x86_64-linux.tar.gz` for systems
+where a package cannot be used. It contains the release binary and
+`install.sh`:
+
+```bash
+tar -xzf daymark-0.1.1-x86_64-linux.tar.gz
+cd daymark-0.1.1
+./install.sh --no-build
+```
+
 **The first install needs one sign-out and sign-in.** GNOME on Wayland only scans
 for new Shell extensions at login; Daymark's setup sheet explains this and the
 extension begins reporting on the next login.
 
-To remove it:
+To remove a source or archive install:
 
 ```bash
 ./install.sh --uninstall          # keeps your recorded history
