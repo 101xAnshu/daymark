@@ -183,8 +183,12 @@ while :; do
     rss_mib=$(awk -v k="$rss" 'BEGIN { printf "%.2f", k / 1024 }')
 
     printf '%-8s %12s %9s %13s %8s\n' "$elapsed" "$rss_mib" "$cpu" "$rate" "$threads"
-    rss_min=$rss
-    rss_max=$rss
+    if [[ -z $rss_min ]] || ((rss < rss_min)); then
+        rss_min=$rss
+    fi
+    if [[ -z $rss_max ]] || ((rss > rss_max)); then
+        rss_max=$rss
+    fi
     cpu_sum=$(awk -v a="$cpu_sum" -v b="$cpu" 'BEGIN { print a + b }')
     wakeups_sum=$(awk -v a="$wakeups_sum" -v b="$rate" 'BEGIN { print a + b }')
     rows=$((rows + 1))
