@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if state == "presence" {
             seed_presence(&store);
         }
-        if state == "totals" {
+        if state == "totals" || state == "history-rollup" {
             // Simulate retention: older days keep their daily totals only.
             let _ = store.prune_before(Day::today().add_days(-5).start_ts());
         }
@@ -186,6 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "past" => ctl.set_selected_for_render(-3),
             "past-empty" => ctl.set_selected_for_render(-5),
             "totals" => ctl.set_selected_for_render(-6),
+            "history-rollup" => ctl.set_view_for_render(1),
             "error" => ctl.set_load_error(
                 "The local data file could not be opened: permission denied.".into(),
             ),

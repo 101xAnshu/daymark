@@ -749,22 +749,28 @@ impl AppController {
             .into(),
         );
 
-        // History: a calm, scannable two-week list.
+        // History: a calm, scannable two-week list. Days whose intervals were
+        // pruned still contribute their preserved totals.
         let history_start = today.add_days(-(HISTORY_DAYS - 1)).start_ts();
-        let mut history_rows = store
-            .sessions_between(history_start, today.end_ts())
+        let mut history_data = store
+            .day_data_between(history_start, today.end_ts())
             .unwrap_or_default();
         if let Some(current) = &live.current {
             let end = current.started.saturating_add(current.elapsed.max(0));
             if end > history_start {
-                history_rows.push(SessionRow {
+                history_data.rows.push(SessionRow {
                     app_id: current.app_id,
                     started: current.started,
                     ended: end,
                 });
             }
         }
-        let history_totals = stats::totals_ending_at(&history_rows, today, HISTORY_DAYS as i64);
+        let history_totals = stats::totals_ending_at_with_rollups(
+            &history_data.rows,
+            &history_data.rollups,
+            today,
+            HISTORY_DAYS as i64,
+        );
         let max_history = history_totals
             .iter()
             .map(|(_, v)| *v)
