@@ -14,3 +14,4 @@ pub mod platform;
 pub mod settings;
 pub mod stats;
 pub mod tracker;
+pub mod update;
