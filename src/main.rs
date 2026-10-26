@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
@@ -12,6 +13,15 @@ use daymark::instance::{self, COMMAND_NONE, COMMAND_QUIT, InstanceGuard};
 use daymark::logging;
 use daymark::settings::{self, Settings};
 use daymark::tracker;
+
+/// Refresh interval while the window is visible.
+const UI_TICK: Duration = Duration::from_millis(700);
+
+thread_local! {
+    /// The lifecycle timer lives on the UI thread. The IPC helper posts a
+    /// closure that reaches it after a hidden window has stopped it.
+    static UI_TIMER: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
+}
 
 fn main() -> std::process::ExitCode {
     match real_main() {
@@ -152,15 +162,10 @@ fn real_main() -> Result<(), String> {
     let shutting_down = Arc::new(AtomicBool::new(false));
     let waker: Arc<std::sync::Mutex<Option<std::thread::Thread>>> =
         Arc::new(std::sync::Mutex::new(None));
-    guard.listen(
-        shutting_down.clone(),
-        command.clone(),
-        if background {
-            Some(waker.clone())
-        } else {
-            None
-        },
-    )?;
+    // The listener only stores an atomic command. In the headless process the
+    // parked main thread is the waker; once a window exists a small helper
+    // thread forwards IPC wakeups into the Slint event loop instead.
+    guard.listen(shutting_down.clone(), command.clone(), Some(waker.clone()))?;
 
     // `--background` must be genuinely invisible: no Slint platform, no winit
     // window, no event loop. The tracker and IPC listener run on their own
@@ -212,20 +217,52 @@ fn real_main() -> Result<(), String> {
     controller.borrow_mut().begin_first_run();
 
     // A single, inexpensive lifecycle timer. It handles the local IPC socket
-    // and refreshes only when visible data actually changed.
+    // and refreshes only when visible data actually changed. While the window
+    // is hidden the timer stops; the IPC listener unparks a helper thread that
+    // posts a wakeup into the event loop, so reopening from the application grid
+    // still works without a periodic poll.
     let timer = slint::Timer::default();
     let timer_controller = controller.clone();
-    timer.start(
-        slint::TimerMode::Repeated,
-        Duration::from_millis(700),
-        move || {
-            if let Ok(mut ctl) = timer_controller.try_borrow_mut() {
+    timer.start(slint::TimerMode::Repeated, UI_TICK, move || {
+        let hidden = match timer_controller.try_borrow_mut() {
+            Ok(mut ctl) => {
                 ctl.tick();
+                ctl.window_hidden()
             }
-        },
-    );
-    // The timer must outlive main's event loop.
-    Box::leak(Box::new(timer));
+            // A callback owns the controller right now; keep the timer alive.
+            Err(_) => false,
+        };
+        UI_TIMER.with(|slot| {
+            if let Ok(slot) = slot.try_borrow() {
+                if let Some(timer) = slot.as_ref() {
+                    if hidden {
+                        timer.stop();
+                    } else if timer.interval() != UI_TICK {
+                        timer.set_interval(UI_TICK);
+                    }
+                }
+            }
+        });
+    });
+    // Keep the timer for the life of the event loop; the callback above and
+    // the IPC waker both look it up on the UI thread.
+    UI_TIMER.with(|slot| *slot.borrow_mut() = Some(timer));
+
+    let waker_thread = std::thread::Builder::new()
+        .name("daymark-ui-wake".into())
+        .spawn(move || {
+            loop {
+                std::thread::park();
+                if slint::invoke_from_event_loop(wake_ui_timer).is_err() {
+                    return;
+                }
+            }
+        })
+        .map_err(|e| format!("could not start the interface waker: {e}"))?;
+    if let Ok(mut slot) = waker.lock() {
+        *slot = Some(waker_thread.thread().clone());
+    }
+    drop(waker_thread);
 
     controller
         .borrow()
@@ -245,6 +282,20 @@ fn real_main() -> Result<(), String> {
     );
     drop(guard);
     Ok(())
+}
+
+/// Runs on the UI thread. A hidden window has stopped the regular timer; the
+/// IPC listener unparks its helper thread, which calls this through
+/// `slint::invoke_from_event_loop` so show and quit are handled immediately.
+fn wake_ui_timer() {
+    UI_TIMER.with(|slot| {
+        if let Ok(slot) = slot.try_borrow() {
+            if let Some(timer) = slot.as_ref() {
+                timer.set_interval(Duration::from_millis(1));
+                timer.restart();
+            }
+        }
+    });
 }
 
 fn print_help() {

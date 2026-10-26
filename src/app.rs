@@ -248,6 +248,10 @@ pub struct AppController {
     last_theme_poll: Instant,
     restore_maximized: bool,
     command: Option<Arc<AtomicU8>>,
+    /// Set while the window is hidden to the background. Slint's own
+    /// `is_visible()` stays true for the `hide_without_quitting` backport, so
+    /// the controller tracks the lifecycle itself.
+    window_hidden: bool,
     /// Seconds left on the current timed pause, or 0 when there is none.
     pause_remaining: i64,
     last_pause_status: String,
@@ -308,6 +312,7 @@ impl AppController {
             last_theme_poll: Instant::now(),
             restore_maximized: false,
             command,
+            window_hidden: false,
             pause_remaining: 0,
             last_pause_status: String::new(),
         }));
@@ -1016,7 +1021,9 @@ impl AppController {
             controller.borrow().ui.on_hide_window(move || {
                 let mut ctl = c.borrow_mut();
                 ctl.restore_maximized = ctl.ui.window().is_maximized();
-                let _ = ctl.ui.window().hide_without_quitting();
+                if ctl.ui.window().hide_without_quitting().is_ok() {
+                    ctl.window_hidden = true;
+                }
             });
         }
         {
@@ -1056,7 +1063,9 @@ impl AppController {
             controller.borrow().ui.window().on_close_requested(move || {
                 if let Ok(mut ctl) = c.try_borrow_mut() {
                     ctl.restore_maximized = ctl.ui.window().is_maximized();
-                    let _ = ctl.ui.window().hide_without_quitting();
+                    if ctl.ui.window().hide_without_quitting().is_ok() {
+                        ctl.window_hidden = true;
+                    }
                 }
                 slint::CloseRequestResponse::KeepWindowShown
             });
@@ -1126,7 +1135,9 @@ impl AppController {
                     self.theme_signal.store(true, Ordering::Relaxed);
                     let window = self.ui.window();
                     window.set_minimized(false);
-                    let _ = self.ui.show();
+                    if self.ui.show().is_ok() {
+                        self.window_hidden = false;
+                    }
                     if self.restore_maximized {
                         window.set_maximized(true);
                     }
@@ -1137,6 +1148,9 @@ impl AppController {
                 }
                 _ => {}
             }
+        }
+        if self.window_hidden {
+            return;
         }
         if let Some(result) = self.setup_job.lock().ok().and_then(|mut job| job.take()) {
             self.finish_setup(result);
@@ -1157,9 +1171,6 @@ impl AppController {
         let is_maximized = self.ui.window().is_maximized();
         if self.ui.get_maximized() != is_maximized {
             self.ui.set_maximized(is_maximized);
-        }
-        if !self.ui.window().is_visible() {
-            return;
         }
         // While a pause runs, refresh when its status line changes — the
         // remaining time moves a minute at a time.
@@ -1294,6 +1305,12 @@ impl AppController {
 
     pub fn tracker_handle(&self) -> Option<TrackerHandle> {
         self.tracker.clone()
+    }
+
+    /// Whether the window is hidden to the background. Used by the lifecycle
+    /// timer so it can stop while there is nothing to draw.
+    pub fn window_hidden(&self) -> bool {
+        self.window_hidden
     }
 
     pub fn set_view_for_render(&mut self, view: i32) {
