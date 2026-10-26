@@ -536,13 +536,16 @@ mod tests {
         }
     }
 
-    fn seed_session(db_path: &Path, now: i64) {
+    fn seed_session(db_path: &Path, now: i64) -> Store {
         let store = Store::open_at(db_path).unwrap();
         let today = Day::from_timestamp(now);
         let id = store.upsert_app(&app(), now).unwrap();
         let closed = store.open_session(id, today.start_ts() + 60).unwrap();
         store.close_session(closed, today.start_ts() + 120).unwrap();
         store.open_session(id, today.start_ts() + 180).unwrap();
+        // Keep the write connection open: doctor and status must work while
+        // the application already holds its own connection and WAL.
+        store
     }
 
     fn write_state(path: &Path, name: &str, away: bool, now: i64) {
@@ -568,7 +571,7 @@ mod tests {
         store.set_setting("retention_days", "90").unwrap();
         crate::db::migrate_legacy_identities(&store);
         drop(store);
-        seed_session(&paths.db, now);
+        let _live = seed_session(&paths.db, now);
         write_state(&paths.state, "Example Editor", false, now);
         fs::create_dir_all(paths.autostart.parent().unwrap()).unwrap();
         fs::write(&paths.autostart, "[Desktop Entry]\n").unwrap();
@@ -642,7 +645,7 @@ mod tests {
         let dir = TempDir::new("status-active");
         let paths = dir.paths();
         let now = date::unix_now();
-        seed_session(&paths.db, now);
+        let _live = seed_session(&paths.db, now);
         write_state(&paths.state, "Example Editor", false, now);
         assert_eq!(
             status_line(&paths, now),
