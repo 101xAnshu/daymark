@@ -192,6 +192,24 @@ pub fn chromium_history_paths(home: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Collect domain seconds from every supported local browser profile. A locked
+/// or malformed profile is skipped; this function never writes to a browser
+/// database and never touches the network.
+pub fn collect_domains(home: &Path, start: i64, end: i64) -> Vec<(String, i64)> {
+    let mut visits = Vec::new();
+    for path in firefox_history_paths(home) {
+        if let Ok(mut found) = read_firefox_history(&path, start, end) {
+            visits.append(&mut found);
+        }
+    }
+    for path in chromium_history_paths(home) {
+        if let Ok(mut found) = read_chromium_history(&path, start, end) {
+            visits.append(&mut found);
+        }
+    }
+    domain_seconds(&visits, start, end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +364,39 @@ mod tests {
             chromium_history_paths(&home.0),
             vec![chromium.join("History")]
         );
+    }
+
+    #[test]
+    fn collects_domains_from_both_browser_families() {
+        let home = TempDir::new("collect");
+        let firefox = home.0.join(".mozilla/firefox/p.default");
+        fs::create_dir_all(&firefox).unwrap();
+        let connection = Connection::open(firefox.join("places.sqlite")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT, hidden INTEGER DEFAULT 0);\n\
+                 CREATE TABLE moz_historyvisits (id INTEGER PRIMARY KEY, place_id INTEGER, visit_date INTEGER);\n\
+                 INSERT INTO moz_places(id, url) VALUES(1, 'https://github.com/x');\n\
+                 INSERT INTO moz_historyvisits(place_id, visit_date) VALUES(1, 1000000000);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let chromium = home.0.join(".config/chromium/Default");
+        fs::create_dir_all(&chromium).unwrap();
+        let connection = Connection::open(chromium.join("History")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT, hidden INTEGER DEFAULT 0);\n\
+                 CREATE TABLE visits (id INTEGER PRIMARY KEY, url INTEGER, visit_time INTEGER);\n\
+                 INSERT INTO urls(id, url) VALUES(1, 'https://example.com/y');\n\
+                 INSERT INTO visits(url, visit_time) VALUES(1, 11644474700000000);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let domains = collect_domains(&home.0, 0, 2_000);
+        assert!(domains.iter().any(|(domain, _)| domain == "github.com"));
+        assert!(domains.iter().any(|(domain, _)| domain == "example.com"));
     }
 }
