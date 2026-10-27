@@ -70,12 +70,8 @@ not the headless footprint.
 | Dark | History | Settings |
 | --- | --- | --- |
 | ![Dark theme](docs/daymark-dark.png) | ![History](docs/daymark-history.png) | ![Settings](docs/daymark-settings.png) |
-| **Setup** | **First run** | |
-| ![Setup](docs/daymark-setup.png) | ![First run](docs/daymark-first-run.png) | |
-
-<p align="center">
-  <img src="docs/daymark-rhythm.png" width="720" alt="The rhythm view: seven days by hour" />
-</p>
+| **Setup** | **First run** | **Rhythm** |
+| ![Setup](docs/daymark-setup.png) | ![First run](docs/daymark-first-run.png) | ![Rhythm view](docs/daymark-rhythm.png) |
 
 ## Install
 
