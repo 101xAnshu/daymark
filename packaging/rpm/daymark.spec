@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           daymark
-Version:        0.1.1
+Version:        0.2.0
 Release:        1
 Summary:        Quiet local screen time journal for GNOME
 
@@ -48,5 +48,8 @@ cp -a . %{buildroot}/
 /usr/lib/systemd/user/daymark.service
 
 %changelog
+* Tue Oct 27 2026 Daymark contributors <maintainers@daymark.app> - 0.2.0-1
+- Release 0.2.0: reliability, tray, weekly digest, opt-in site names and arm64 packages.
+
 * Mon Oct 26 2026 Daymark contributors <maintainers@daymark.app> - 0.1.1-1
 - Release 0.1.1.
