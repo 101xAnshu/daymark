@@ -4,6 +4,7 @@ import { Theme, Hairline, SlidersIcon, CloseIcon, SearchIcon, Chevron, Switch, C
 export struct AppRow {
     name: string,
     duration: string,
+    share: string,
     ratio: float,
     initial: string,
     has-icon: bool,
@@ -1061,7 +1062,7 @@ export component AppWindow inherits Window {
                                                 Rectangle {
                                                     x: 44px;
                                                     y: 0px;
-                                                    width: parent.width - 110px;
+                                                    width: parent.width - 194px;
                                                     height: 48px;
                                                     background: transparent;
 
@@ -1094,7 +1095,20 @@ export component AppWindow inherits Window {
                                                 }
 
                                                 Text {
-                                                    x: parent.width - 66px;
+                                                    x: parent.width - 142px;
+                                                    y: 0px;
+                                                    width: 42px;
+                                                    height: 100%;
+                                                    text: app.share;
+                                                    font-size: Theme.micro-size;
+                                                    color: Theme.text-tertiary;
+                                                    horizontal-alignment: right;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+
+                                                Text {
+                                                    x: parent.width - 94px;
                                                     y: 0px;
                                                     width: 58px;
                                                     height: 100%;

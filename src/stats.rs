@@ -45,6 +45,63 @@ pub struct DayTotals {
     pub has_rollup: bool,
 }
 
+/// One visible application on the Day list, with its share of the unchanged
+/// day total. Hidden apps have no row and therefore no share.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DayApp {
+    pub app_id: i64,
+    pub seconds: i64,
+    pub share: f32,
+}
+
+/// Fraction of a day total. The total is the whole day, including time from
+/// apps the user has ignored, so share fractions are honest even though their
+/// rows are hidden.
+pub fn share_fraction(seconds: i64, total: i64) -> f32 {
+    if seconds <= 0 || total <= 0 {
+        return 0.0;
+    }
+    (seconds as f64 / total as f64).clamp(0.0, 1.0) as f32
+}
+
+/// A quiet percentage label next to an app's duration. Empty at zero, `<1%`
+/// for a sliver, and a whole percent otherwise.
+pub fn share_label(seconds: i64, total: i64) -> String {
+    if seconds <= 0 || total <= 0 {
+        return String::new();
+    }
+    let percent = share_fraction(seconds, total) * 100.0;
+    if percent > 0.0 && percent < 1.0 {
+        "<1%".into()
+    } else {
+        format!("{}%", percent.round() as i64)
+    }
+}
+
+/// Visible application rows for `day`. Ignored apps are removed from the rows
+/// and from the shares, but the returned total stays the whole recorded day.
+/// Ignoring therefore hides a row without rewriting the day's total, timeline
+/// or hourly chart; the hidden app's time remains in all of them.
+pub fn visible_day_apps(
+    rows: &[SessionRow],
+    rollups: &[RollupTotal],
+    day: Day,
+    ignored: &HashSet<i64>,
+) -> (i64, Vec<DayApp>) {
+    let totals = day_totals(rows, rollups, day);
+    let apps = totals
+        .apps
+        .iter()
+        .filter(|(app_id, seconds)| !ignored.contains(app_id) && *seconds > 0)
+        .map(|(app_id, seconds)| DayApp {
+            app_id: *app_id,
+            seconds: *seconds,
+            share: share_fraction(*seconds, totals.total),
+        })
+        .collect();
+    (totals.total, apps)
+}
+
 impl DayTotals {
     /// A day whose raw intervals aged out. The total and per-app split survive,
     /// but the hour of day does not, so the interface must not invent it.

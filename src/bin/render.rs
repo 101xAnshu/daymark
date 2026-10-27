@@ -37,6 +37,15 @@ fn seed_presence(store: &Store) {
     }
 }
 
+fn demo_app_id(store: &Store, key: &str) -> Option<i64> {
+    store
+        .conn
+        .query_row("SELECT id FROM apps WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .ok()
+}
+
 struct HeadlessPlatform {
     window: Rc<MinimalSoftwareWindow>,
 }
@@ -94,6 +103,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         daymark::demo::seed(&store);
         if state == "presence" {
             seed_presence(&store);
+        }
+        if state == "alias" {
+            if let Some(id) = demo_app_id(&store, "brave-browser.desktop") {
+                let _ = store.set_app_alias(id, Some("Research browser"));
+            }
         }
         if state == "totals" || state == "history-rollup" {
             // Simulate retention: older days keep their daily totals only.

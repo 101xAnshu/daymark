@@ -2,7 +2,7 @@
 //! Slint dashboard consumes, and handles user actions.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -201,6 +201,15 @@ fn initial(name: &str) -> String {
         .find(|c| c.is_alphanumeric())
         .map(|c| c.to_uppercase().collect())
         .unwrap_or_else(|| "•".into())
+}
+
+/// A user-chosen alias when present, otherwise the recorded application name.
+/// A blank or whitespace-only alias never hides the real name.
+fn display_name<'a>(alias: Option<&'a str>, name: &'a str) -> &'a str {
+    alias
+        .map(str::trim)
+        .filter(|alias| !alias.is_empty())
+        .unwrap_or(name)
 }
 
 fn peak_label(hour: u32) -> String {
@@ -700,16 +709,30 @@ impl AppController {
         );
         self.ui.set_has_heatmap(heatmap_total > 0);
 
-        // Application rows, including the current live interval.
-        let total_apps = day_totals.apps.len();
+        // Application rows, including the current live interval. Ignored apps
+        // lose their row and their share, while the day total keeps every
+        // recorded minute, including the time they contributed.
+        let ignored: HashSet<i64> = app_infos
+            .values()
+            .filter(|info| info.ignored)
+            .map(|info| info.id)
+            .collect();
+        let (_, visible_apps) = stats::visible_day_apps(&rows, &rollups, day, &ignored);
+        let total_apps = visible_apps.len();
         let query_lower = self.query.to_lowercase();
-        let top = day_totals.apps.first().map(|(_, v)| *v).unwrap_or(1).max(1);
+        let top = visible_apps
+            .iter()
+            .map(|app| app.seconds)
+            .max()
+            .unwrap_or(1)
+            .max(1);
         let mut app_rows = Vec::new();
-        for (app_id, seconds) in &day_totals.apps {
-            let Some(info) = app_infos.get(app_id) else {
+        for app in &visible_apps {
+            let Some(info) = app_infos.get(&app.app_id) else {
                 continue;
             };
-            if !query_lower.is_empty() && !info.name.to_lowercase().contains(&query_lower) {
+            let name = display_name(info.alias.as_deref(), &info.name);
+            if !query_lower.is_empty() && !name.to_lowercase().contains(&query_lower) {
                 continue;
             }
             let tint = app_tint(&info.key, self.dark);
@@ -718,10 +741,11 @@ impl AppController {
                 None => (Image::default(), false),
             };
             app_rows.push(AppRow {
-                name: info.name.clone().into(),
-                duration: date::format_duration(*seconds).into(),
-                ratio: (*seconds as f32 / top as f32).clamp(0.0, 1.0),
-                initial: initial(&info.name).into(),
+                name: name.into(),
+                duration: date::format_duration(app.seconds).into(),
+                share: stats::share_label(app.seconds, day_totals.total).into(),
+                ratio: (app.seconds as f32 / top as f32).clamp(0.0, 1.0),
+                initial: initial(name).into(),
                 has_icon,
                 icon,
                 tint,
