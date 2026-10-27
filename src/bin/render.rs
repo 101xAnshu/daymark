@@ -9,10 +9,42 @@ use slint::platform::{Platform, PlatformError, WindowAdapter};
 use slint::{ComponentHandle, PhysicalSize};
 
 use daymark::app::AppController;
+use daymark::date::Day;
 use daymark::db::Store;
+use daymark::desktop::ResolvedApp;
 use daymark::settings::{Settings, ThemePref};
 use daymark::tracker::{TrackerHandle, TrackingStatus};
 use daymark::{AppWindow, Theme};
+
+/// One quiet audio-backed session on today's timeline, far enough from the
+/// demo blocks that the note is easy to inspect.
+fn seed_presence(store: &Store) {
+    let today = Day::today();
+    let app = ResolvedApp {
+        key: "org.example.Player".into(),
+        name: "Media Player".into(),
+        icon: None,
+        desktop_id: None,
+        wm_class: None,
+        matched: false,
+    };
+    if let Ok(app_id) = store.upsert_app(&app, today.start_ts()) {
+        if let Ok(id) =
+            store.open_session_with_presence(app_id, today.start_ts() + 22 * 3600, "audio")
+        {
+            let _ = store.close_session(id, today.start_ts() + 22 * 3600 + 12 * 60);
+        }
+    }
+}
+
+fn demo_app_id(store: &Store, key: &str) -> Option<i64> {
+    store
+        .conn
+        .query_row("SELECT id FROM apps WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .ok()
+}
 
 struct HeadlessPlatform {
     window: Rc<MinimalSoftwareWindow>,
@@ -66,11 +98,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         && state != "light-empty"
         && state != "empty-banner"
         && state != "empty-waiting"
+        && state != "rhythm-empty"
     {
         daymark::demo::seed(&store);
+        if state == "presence" {
+            seed_presence(&store);
+        }
+        if state == "alias" {
+            if let Some(id) = demo_app_id(&store, "brave-browser.desktop") {
+                let _ = store.set_app_alias(id, Some("Research browser"));
+            }
+        }
+        if state == "ignored" || state == "ignored-shown" || state == "editor" {
+            if let Some(id) = demo_app_id(&store, "org.gnome.Ptyxis.desktop") {
+                let _ = store.set_app_ignored(id, true);
+            }
+        }
+        if state == "editor" {
+            if let Some(id) = demo_app_id(&store, "brave-browser.desktop") {
+                let _ = store.set_app_alias(id, Some("Research browser"));
+            }
+        }
+        if state == "sites" {
+            let _ = store.replace_domain_totals(
+                Day::today().start_ts(),
+                &[
+                    ("github.com".into(), 2 * 3600),
+                    ("example.com".into(), 3600),
+                    ("docs.rs".into(), 1800),
+                ],
+            );
+        }
+        if state == "totals" || state == "history-rollup" {
+            // Simulate retention: older days keep their daily totals only.
+            let _ = store.prune_before(Day::today().add_days(-5).start_ts());
+        }
     }
     let mut settings = Settings {
         autostart: true,
+        site_names_enabled: state == "sites",
         ..Settings::default()
     };
     let status = TrackingStatus::Active;
@@ -91,10 +157,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if state == "dark" || state == "dark-settings" {
         settings.theme = ThemePref::Dark;
     }
-    if state == "light" || state == "light-settings" || state == "light-empty" {
+    if state == "light"
+        || state == "light-settings"
+        || state == "light-empty"
+        || state == "light-rhythm"
+    {
         settings.theme = ThemePref::Light;
     }
     let tracker = TrackerHandle::demo(settings.clone(), handle_status, detail);
+    if state == "now" {
+        // A live session lets the screenshot exercises the Now metric without
+        // touching the seeded database.
+        let now = daymark::date::unix_now();
+        if let Ok(mut live) = tracker.live.lock() {
+            live.current = Some(daymark::tracker::LiveCurrent {
+                app_id: 1,
+                key: "brave-browser.desktop".into(),
+                name: "Brave Web Browser".into(),
+                icon: Some("brave-browser".into()),
+                started: now - 23 * 60,
+                elapsed: 23 * 60,
+                presence: daymark::tracker::Presence::Input,
+            });
+        }
+    }
 
     let scale = 1.0f32;
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
@@ -107,13 +193,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }))
     .ok();
 
+    let editor_app = demo_app_id(&store, "brave-browser.desktop");
     let ui = AppWindow::new()?;
     let controller = AppController::new(ui, Some(store), Some(tracker), settings, None);
     {
         let mut ctl = controller.borrow_mut();
         match state.as_str() {
             "history" => ctl.set_view_for_render(1),
+            "rhythm" => ctl.set_view_for_render(2),
+            "light-rhythm" => ctl.set_view_for_render(2),
+            "rhythm-empty" => ctl.set_view_for_render(2),
+            "ignored" => {}
+            "ignored-shown" => ctl.show_ignored_for_render(true),
+            "editor" => {
+                if let Some(id) = editor_app {
+                    ctl.edit_app_for_render(id);
+                }
+            }
+            "timeline" => {}
+            "timeline-empty" => ctl.set_selected_for_render(-9),
+            "now" => {}
             "settings" | "dark-settings" | "light-settings" => ctl.open_settings_for_render(),
+            "update" => {
+                ctl.open_settings_for_render();
+                ctl.ui.set_update_notice(
+                    "Daymark 0.1.2 is available. Update with your package manager.".into(),
+                );
+            }
             "delete" => {
                 ctl.open_settings_for_render();
                 ctl.ui.set_confirm_delete(true);
@@ -128,6 +234,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "banner" => { /* the setup banner is shown automatically */ }
             "past" => ctl.set_selected_for_render(-3),
             "past-empty" => ctl.set_selected_for_render(-5),
+            "totals" => ctl.set_selected_for_render(-6),
+            "history-rollup" => ctl.set_view_for_render(1),
             "error" => ctl.set_load_error(
                 "The local data file could not be opened: permission denied.".into(),
             ),

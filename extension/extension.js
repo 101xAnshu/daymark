@@ -13,12 +13,16 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as LoginManager from 'resource:///org/gnome/shell/misc/loginManager.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const STATE_VERSION = 2;
+const STATE_VERSION = 3;
 const DEFAULT_IDLE_SECONDS = 300;
 const HEARTBEAT_SECONDS = 15;
 const IDLE_RECHECK_SECONDS = 60;
 // org.gnome.SessionManager GSM_INHIBITOR_FLAG_IDLE
 const IDLE_INHIBIT_FLAG = 8;
+// MPRIS players live on the session bus; nothing here touches the network.
+const MPRIS_PREFIX = 'org.mpris.MediaPlayer2.';
+const MPRIS_PATH = '/org/mpris/MediaPlayer2';
+const MPRIS_PLAYER_INTERFACE = 'org.mpris.MediaPlayer2.Player';
 
 export default class DaymarkExtension extends Extension {
     enable() {
@@ -26,12 +30,16 @@ export default class DaymarkExtension extends Extension {
         GLib.mkdir_with_parents(this._dir, 0o700);
         this._statePath = GLib.build_filenamev([this._dir, 'state.json']);
         this._configPath = GLib.build_filenamev([this._dir, 'config.json']);
+        this._notifyPath = GLib.build_filenamev([this._dir, 'notify.json']);
+        this._lastNotificationId = null;
 
         this._enabled = true;
         this._seq = 0;
         this._focus = null;
         this._idle = false;
         this._inhibited = false;
+        this._audio = false;
+        this._audioProbe = false;
         this._awaySince = 0;
         this._idleSeconds = DEFAULT_IDLE_SECONDS;
         this._idleWatchId = 0;
@@ -48,6 +56,8 @@ export default class DaymarkExtension extends Extension {
             this._configMonitorId = this._configMonitor.connect('changed', (_monitor, file) => {
                 if (file && file.get_basename() === 'config.json')
                     this._loadConfig();
+                else if (file && file.get_basename() === 'notify.json')
+                    this._showNotification();
             });
         } catch (e) {
             this._configMonitor = null;
@@ -90,6 +100,7 @@ export default class DaymarkExtension extends Extension {
         this._heartbeatId = GLib.timeout_add_seconds(
             GLib.PRIORITY_LOW, HEARTBEAT_SECONDS,
             () => {
+                this._refreshAudio();
                 this._writeState();
                 return GLib.SOURCE_CONTINUE;
             });
@@ -97,6 +108,8 @@ export default class DaymarkExtension extends Extension {
         this._readFocus();
         this._armIdleWatch();
         this._writeState();
+        this._refreshAudio();
+        this._showNotification();
     }
 
     disable() {
@@ -155,6 +168,41 @@ export default class DaymarkExtension extends Extension {
         }
     }
 
+    _showNotification() {
+        if (!this._enabled)
+            return;
+        let payload;
+        try {
+            const [ok, bytes] = GLib.file_get_contents(this._notifyPath);
+            if (!ok)
+                return;
+            payload = JSON.parse(new TextDecoder().decode(bytes));
+        } catch (e) {
+            return;
+        }
+        if (!payload || typeof payload.id !== 'string' || !payload.id)
+            return;
+        if (payload.id === this._lastNotificationId)
+            return;
+        this._lastNotificationId = payload.id;
+        const title = typeof payload.title === 'string' && payload.title
+            ? payload.title : 'Daymark';
+        const body = typeof payload.body === 'string' ? payload.body : '';
+        try {
+            if (typeof Main.notify === 'function')
+                Main.notify(title, body);
+            else
+                console.debug('[Daymark] Main.notify is unavailable');
+        } catch (e) {
+            console.debug(`[Daymark] could not show the digest: ${e}`);
+        }
+        try {
+            Gio.File.new_for_path(this._notifyPath).delete(null);
+        } catch (e) {
+            // The app can replace it next week; a stale file is harmless.
+        }
+    }
+
     _clearWatches() {
         if (this._idleWatchId) {
             this._idleMonitor.remove_watch(this._idleWatchId);
@@ -186,47 +234,192 @@ export default class DaymarkExtension extends Extension {
     _onIdle() {
         if (!this._enabled || this._idle)
             return;
-        // Ask the session manager whether something (a video, a presentation)
-        // is inhibiting idle. If so, this is still active use and we check
-        // again a minute later.
-        Gio.DBus.session.call(
-            'org.gnome.SessionManager', '/org/gnome/SessionManager',
-            'org.gnome.SessionManager', 'IsInhibited',
-            new GLib.Variant('(u)', [IDLE_INHIBIT_FLAG]), null,
-            Gio.DBusCallFlags.NONE, 2000, this._cancellable,
-            (connection, result) => {
-                let inhibited = false;
-                try {
-                    [inhibited] = connection.call_finish(result).deepUnpack();
-                } catch (e) {
-                    // No session manager answer: use plain idleness.
-                }
-                if (!this._enabled)
-                    return;
-                this._inhibited = !!inhibited;
-                if (this._inhibited) {
-                    if (this._idleRecheckId)
-                        GLib.source_remove(this._idleRecheckId);
-                    this._idleRecheckId = GLib.timeout_add_seconds(
-                        GLib.PRIORITY_LOW, IDLE_RECHECK_SECONDS, () => {
-                            this._idleRecheckId = 0;
-                            this._onIdle();
-                            return GLib.SOURCE_REMOVE;
-                        });
-                    return;
-                }
-                const idleMs = this._idleMonitor.get_idletime();
-                if (idleMs < this._idleSeconds * 1000) {
-                    // The timer was a recheck after an idle inhibitor ended, and
-                    // the user is active again. Resume the normal watch.
-                    this._armIdleWatch();
-                    return;
-                }
-                this._idle = true;
-                this._setAway(true, Math.max(0, Date.now() - idleMs));
-                this._armActiveWatch();
-                this._writeState();
+        // A session inhibitor or a playing MPRIS player means the machine may
+        // still be in use even though the core idle monitor saw no input.
+        // Neither source is trusted forever: the tracker applies its own
+        // two-hour cap from the last input.
+        this._probePresence((inhibited, audio) => {
+            if (!this._enabled || this._idle)
+                return;
+            this._inhibited = !!inhibited;
+            this._audio = !!audio;
+            this._writeState();
+            if (this._inhibited || this._audio) {
+                this._scheduleIdleRecheck();
+                return;
+            }
+            const idleMs = this._idleMonitor ? this._idleMonitor.get_idletime() : 0;
+            if (idleMs < this._idleSeconds * 1000) {
+                // The timer was a recheck after an inhibitor or player ended,
+                // and the user is active again. Resume the normal watch.
+                this._armIdleWatch();
+                return;
+            }
+            this._idle = true;
+            this._setAway(true, Math.max(0, Date.now() - idleMs));
+            this._armActiveWatch();
+            this._writeState();
+        });
+    }
+
+    _scheduleIdleRecheck() {
+        if (this._idleRecheckId)
+            GLib.source_remove(this._idleRecheckId);
+        this._idleRecheckId = GLib.timeout_add_seconds(
+            GLib.PRIORITY_LOW, IDLE_RECHECK_SECONDS, () => {
+                this._idleRecheckId = 0;
+                this._onIdle();
+                return GLib.SOURCE_REMOVE;
             });
+    }
+
+    _sessionBus() {
+        try {
+            return Gio.DBus.session;
+        } catch (e) {
+            // A session without a bus simply has no inhibitors or players.
+            return null;
+        }
+    }
+
+    _probePresence(callback) {
+        let pending = 2;
+        let inhibited = false;
+        let audio = false;
+        const done = () => {
+            pending -= 1;
+            if (pending === 0)
+                callback(inhibited, audio);
+        };
+        this._queryInhibited(value => {
+            inhibited = value;
+            done();
+        });
+        this._queryAudio(value => {
+            audio = value;
+            done();
+        });
+    }
+
+    _queryInhibited(callback) {
+        const bus = this._sessionBus();
+        if (!bus) {
+            callback(false);
+            return;
+        }
+        try {
+            bus.call(
+                'org.gnome.SessionManager', '/org/gnome/SessionManager',
+                'org.gnome.SessionManager', 'IsInhibited',
+                new GLib.Variant('(u)', [IDLE_INHIBIT_FLAG]), null,
+                Gio.DBusCallFlags.NONE, 2000, this._cancellable,
+                (connection, result) => {
+                    let inhibited = false;
+                    try {
+                        [inhibited] = connection.call_finish(result).deepUnpack();
+                    } catch (e) {
+                        // No session manager answer: use plain idleness.
+                    }
+                    callback(!!inhibited);
+                });
+        } catch (e) {
+            callback(false);
+        }
+    }
+
+    _refreshAudio() {
+        this._queryAudio(() => {});
+    }
+
+    // Cache the player result. It is refreshed on the heartbeat and on every
+    // idle recheck, so a missing bus, a vanished player or a player that does
+    // not answer can only make audio look inactive.
+    _queryAudio(callback) {
+        if (!this._enabled) {
+            callback(false);
+            return;
+        }
+        if (this._audioProbe) {
+            callback(this._audio);
+            return;
+        }
+        const bus = this._sessionBus();
+        if (!bus) {
+            this._setAudio(false, callback);
+            return;
+        }
+        this._audioProbe = true;
+        try {
+            bus.call(
+                'org.freedesktop.DBus', '/org/freedesktop/DBus',
+                'org.freedesktop.DBus', 'ListNames',
+                null, null, Gio.DBusCallFlags.NONE, 1000, this._cancellable,
+                (connection, result) => {
+                    let names = [];
+                    try {
+                        [names] = connection.call_finish(result).deepUnpack();
+                    } catch (e) {
+                        names = [];
+                    }
+                    const players = (names || []).filter(
+                        name => typeof name === 'string' &&
+                            name.startsWith(MPRIS_PREFIX));
+                    if (players.length === 0) {
+                        this._audioProbe = false;
+                        this._setAudio(false, callback);
+                        return;
+                    }
+                    let remaining = players.length;
+                    let playing = false;
+                    for (const name of players) {
+                        this._checkPlayer(bus, name, status => {
+                            if (status === 'Playing')
+                                playing = true;
+                            remaining -= 1;
+                            if (remaining === 0) {
+                                this._audioProbe = false;
+                                this._setAudio(playing, callback);
+                            }
+                        });
+                    }
+                });
+        } catch (e) {
+            this._audioProbe = false;
+            this._setAudio(false, callback);
+        }
+    }
+
+    _checkPlayer(bus, name, callback) {
+        try {
+            bus.call(
+                name, MPRIS_PATH, 'org.freedesktop.DBus.Properties', 'Get',
+                new GLib.Variant('(ss)', [MPRIS_PLAYER_INTERFACE, 'PlaybackStatus']),
+                null, Gio.DBusCallFlags.NONE, 1000, this._cancellable,
+                (connection, result) => {
+                    let status = '';
+                    try {
+                        const [value] = connection.call_finish(result).deepUnpack();
+                        if (typeof value === 'string')
+                            status = value;
+                        else if (value && value.deepUnpack)
+                            status = value.deepUnpack();
+                    } catch (e) {
+                        status = '';
+                    }
+                    callback(status);
+                });
+        } catch (e) {
+            callback('');
+        }
+    }
+
+    _setAudio(value, callback) {
+        const audio = !!value;
+        const changed = this._audio !== audio;
+        this._audio = audio;
+        if (changed && this._enabled)
+            this._writeState();
+        callback(audio);
     }
 
     _armActiveWatch() {
@@ -352,6 +545,8 @@ export default class DaymarkExtension extends Extension {
             idle: this._idle,
             locked: this._isLocked(),
             inhibited: this._inhibited,
+            audio: this._audio,
+            idle_ms: this._idleMonitor ? this._idleMonitor.get_idletime() : 0,
             idle_seconds: this._idleSeconds,
         };
         try {

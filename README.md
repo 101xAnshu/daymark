@@ -21,7 +21,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-aa5431?style=flat-square" alt="MIT licensed" />
   <img src="https://img.shields.io/badge/GNOME-46--50-aa5431?style=flat-square" alt="GNOME 46 to 50" />
-  <img src="https://img.shields.io/badge/binary-8.5%20MiB-aa5431?style=flat-square" alt="8.5 MB stripped binary" />
+  <img src="https://img.shields.io/badge/binary-10.3%20MiB-aa5431?style=flat-square" alt="10.3 MB stripped binary" />
   <img src="https://img.shields.io/badge/network-none-aa5431?style=flat-square" alt="No network access" />
 </p>
 
@@ -41,20 +41,27 @@ went, and how that compares with your own history. It asks for no account, opens
 no browser engine, makes no network requests, and keeps everything in one small
 SQLite file on the machine in front of you.
 
-The window is a real native app: 8.5 MiB on disk. Started at login with
+The window is a real native app: 10.3 MiB on disk. Started at login with
 `--background`, it opens no window and creates no Slint platform or event loop:
-about 8 MB of memory, 0% idle CPU, and roughly one wakeup every two seconds for
-the tracker. Once you open the window, the interface stays alive for the rest of
-the process, including after you close it to the background. That costs about
-24 MB and keeps the tracker poll, so it is not the headless footprint.
+about 8 MB of memory, 0% idle CPU, and no timed polling while the companion is
+quiet. The tracker waits on an inotify watch and wakes when the companion
+publishes a change, with a 30-second safety check. Once you open the window, the
+interface stays alive for the rest of the process, including after you close it
+to the background. That costs about 24 MB and keeps the tracker watch, so it is
+not the headless footprint.
 
 ## What you get
 
 | You get | You never get |
 | --- | --- |
-| One calm day view — total time, the week's shape, the day's rhythm | Sign-ups, profiles or a subscription |
+| One calm day view — total time, a metrics row, a 24-hour timeline, the week's shape and the day's rhythm | Sign-ups, profiles or a subscription |
+| A totals-only state for days whose raw intervals have aged out, with the day's total and per-app split intact | Invented hourly detail for days that no longer have sessions |
+| A seven-day rhythm view — a 7×24 heatmap of when the week is busy | Streaks, scores or guilt mechanics |
 | A per-app breakdown with real icons and quiet time bars | Window titles, keystrokes, clipboard data or screenshots |
+| Per-app aliases, ignore rules and share percentages | Renaming the recorded app identity |
 | Fourteen days of history at a glance | Cloud sync, analytics, telemetry or any network code |
+| Opt-in, domain-only site names from local browser history | URLs, page titles or browser history by default |
+| An opt-in weekly digest — one local notification on Monday | Email digests or cloud reports |
 | System light/dark that follows GNOME live | A WebView, Electron or Node runtime |
 | A small GNOME companion that publishes one JSON file | A background process that animates or redraws while you are idle |
 
@@ -66,20 +73,31 @@ the process, including after you close it to the background. That costs about
 | **Setup** | **First run** | |
 | ![Setup](docs/daymark-setup.png) | ![First run](docs/daymark-first-run.png) | |
 
+<p align="center">
+  <img src="docs/daymark-rhythm.png" width="720" alt="The rhythm view: seven days by hour" />
+</p>
+
 ## Install
 
 Daymark targets **Ubuntu 24.04+** (GNOME 46+) and **Fedora 42+** (GNOME 48+).
-It has been tested on Ubuntu 26.04 with GNOME Shell 50.1, and the packages are
-built for amd64/x86_64. The `.deb` is built on Ubuntu 22.04 for the glibc 2.35
-floor; Ubuntu 22.04 itself is not a supported runtime because it ships GNOME 42.
-The build includes both the Wayland and X11 window backends.
+It has been tested on Ubuntu 26.04 with GNOME Shell 50.1. Packages are built
+for amd64/x86_64 on Ubuntu 22.04, and the arm64/aarch64 packages are
+cross-built from the same amd64 build environment. The `.deb` keeps the
+glibc 2.35 floor; Ubuntu 22.04 itself is not a supported runtime because it
+ships GNOME 42. The build includes both the Wayland and X11 window backends.
+
+The arm64/aarch64 packages come from cross-compilation on an amd64 runner
+because the free CI plan has no native arm64 runners. CI installs them under
+QEMU for a smoke test. That covers packaging and startup, but a live run on
+real arm64 hardware still needs a separate check.
 
 ### Ubuntu package
 
 Ubuntu 24.04 or newer with GNOME 46 or newer is required. Ubuntu 22.04 ships
 GNOME 42, which the companion does not support.
 
-Download `daymark_<version>_amd64.deb` from the latest release and install it:
+Download `daymark_<version>_amd64.deb` for x86_64 or
+`daymark_<version>_arm64.deb` for arm64 from the latest release and install it:
 
 ```bash
 sudo apt install ./daymark_0.1.1_amd64.deb
@@ -88,7 +106,9 @@ sudo apt install ./daymark_0.1.1_amd64.deb
 ### Fedora package
 
 Fedora 42 or newer with GNOME 48 or newer is required. Download
-`daymark-<version>-1.x86_64.rpm` from the latest release and install it:
+`daymark-<version>-1.x86_64.rpm` for x86_64 or
+`daymark-<version>-1.aarch64.rpm` for arm64 from the latest release and
+install it:
 
 ```bash
 sudo dnf install ./daymark-*.rpm
@@ -102,6 +122,17 @@ your home directory, so package upgrades apply to every user on their own.
 The packages start no service and change no user settings at install time.
 Remove one with `sudo apt remove daymark` or `sudo dnf remove daymark`;
 recorded history is kept in your home directory.
+
+The tray icon uses the desktop's StatusNotifierItem/AppIndicator host. Ubuntu
+ships a host by default (the package is `gnome-shell-extension-appindicator` on
+24.04 and `gnome-shell-ubuntu-extensions` on newer releases). Fedora may need
+the `gnome-shell-extension-appindicator` package; the packages recommend a host
+but do not require it. Without a host, Daymark runs normally and simply has no
+tray icon.
+
+The package scripts default to the host architecture. Pass `--arch arm64` to
+`scripts/build-deb.sh` or `--arch aarch64` to `scripts/build-rpm.sh` for the
+cross build; it needs cargo-zigbuild and Zig.
 
 ### From source
 
@@ -122,7 +153,7 @@ unless you pass `--no-build`.
 
 The release also includes `daymark-<version>-x86_64-linux.tar.gz` for systems
 where a package cannot be used. It contains the release binary and
-`install.sh`:
+`install.sh`. The portable archive is x86_64 only; use a package for arm64:
 
 ```bash
 tar -xzf daymark-0.1.1-x86_64-linux.tar.gz
@@ -162,10 +193,42 @@ To remove a source or archive install:
 ./install.sh --uninstall --purge  # deletes local history too
 ```
 
+### Optional systemd user service
+
+The packages also install `daymark.service` in `/usr/lib/systemd/user`, but do
+not enable it. If you prefer systemd over the XDG autostart entry:
+
+```bash
+systemctl --user enable --now daymark.service
+```
+
+Turn off **Start at login** in Settings so only one launcher starts Daymark. The
+unit runs `daymark --background`, restarts on failure, and stops with the
+graphical session.
+
 ## Use
 
 - Click a day in the weekly chart, or use `←` / `→` to move one day.
-- `T` returns to today; `Ctrl+1` / `Ctrl+2` switch between Day and History.
+- The day view opens with a quiet metrics row: the longest uninterrupted
+  stretch, the number of distinct apps, the time recorded after midnight
+  (00:00–05:00), and the change from the same weekday last week. A **Now**
+  cell appears while a session is live today and shows the current app and its
+  running time. There are no scores, streaks or targets.
+- The 24-hour timeline draws each recorded session as a small block, coloured
+  by app and clipped to the selected day. It comes from the same stored
+  intervals as the rest of the view and holds no window titles, URLs or
+  network data. When recorded time had audio or an idle inhibitor active, a
+  quiet note under the timeline says how much, and the metrics row keeps its
+  existing four columns at the 900 px minimum width.
+- Days older than the retention horizon keep their daily total and per-app
+  split. The Day view then shows a quiet **Totals only** state for the timeline
+  and the by-hour chart, and keeps only the metrics a daily total can support:
+  distinct apps and the change from the same weekday last week. No hourly
+  detail is invented.
+- `T` returns to today; `Ctrl+1` / `Ctrl+2` / `Ctrl+3` switch between Day,
+  History and Rhythm.
+- Rhythm shows the last seven days as a 7×24 heatmap: rows are days, columns
+  are hours, and darker means more time.
 - `Ctrl+,` opens Settings. `Ctrl+W` hides the window. `Ctrl+Q` quits.
 - The ✕ control (or Alt+F4) hides Daymark and keeps tracking in the background;
   **Quit Daymark** in Settings really stops it. After the first open the process
@@ -173,10 +236,23 @@ To remove a source or archive install:
   smaller headless mode.
 - Search filters the application list by name. Clicking anywhere outside the
   field releases focus.
-- Settings holds the idle timeout, retention, appearance, autostart, pause
-  options (15 minutes, 1 hour, or until resumed), the data folder shortcut, and
+- Click the `...` control on an app row to give it a display name or ignore it.
+  Ignored apps are hidden from the list and shares; **Show ignored** reveals
+  them. Shares are the app's portion of the whole day total, which still
+  includes time from ignored apps.
+- The tray icon appears while Daymark has an interface. Its menu opens the
+  window, starts a 15 minute pause, a one hour pause or a pause until resumed,
+  resumes tracking, and quits the app. The icon and tooltip show the paused
+  state. An absent StatusNotifierItem/AppIndicator host only removes the icon;
+  the rest of the app keeps working.
+- Settings holds the idle timeout, retention, appearance, autostart, the weekly
+  digest toggle, site names (off by default), pause options (15 minutes, 1 hour,
+  or until resumed), a local package-update notice, the data folder shortcut, and
   delete/quit actions. A timed pause ends by itself, even while the window is
   hidden; a pause without a deadline ends at the next app start.
+- Site names is opt-in. When it is on, the Day view shows the top domains from
+  local browser history for the selected day. Turning it off deletes the stored
+  domains.
 
 ## Diagnostics
 
@@ -225,19 +301,32 @@ uses the supported mechanism: a deliberately tiny GNOME Shell companion
 The companion publishes only this to `$XDG_RUNTIME_DIR/daymark/state.json`:
 
 - the focused application's identity (desktop id or WM class) and display name
-- idle, locked and away state, and the precise moment input stopped
+- idle, locked and away state, the precise moment input stopped, and
+  milliseconds since the last input
+- whether an idle inhibitor is active, and whether a session-bus MPRIS player
+  reports `Playing`
 - a heartbeat
 
 It never reads window titles, keystrokes, clipboard data, screenshots or
 application content, and it contains no networking code.
 
-The Rust tracker reads that file every two seconds and stores non-overlapping
-intervals in SQLite. It closes them on focus change, idle, lock, sleep or pause,
-and writes a heartbeat every 30 seconds. Idle time is trimmed back to the moment
-the companion says input stopped. Sleep and wall-clock jumps accrue nothing
-because durations use a monotonic clock. Sessions that cross midnight are split,
-and closed intervals are aggregated with overlap clamping, so a day's totals
-always come from stored data.
+The Rust tracker watches `$XDG_RUNTIME_DIR/daymark/` with inotify for the state
+file being closed after a write, moved into place by an atomic replacement,
+created, deleted or given new attributes. A focus, idle or lock change is
+therefore handled as soon as the companion publishes it, usually within
+milliseconds. A 30-second timeout re-reads the file in case an event was missed,
+replacing the old two-second poll. If the runtime directory or the inotify watch
+cannot be created, Daymark logs that once and falls back to the two-second poll.
+The tracker stores non-overlapping intervals in SQLite. It closes them on focus
+change, idle, lock, sleep or pause, and writes a heartbeat every 30 seconds.
+Idle time is trimmed back to the moment the companion says input stopped. Sleep
+and wall-clock jumps accrue nothing because durations use a monotonic clock.
+Sessions that cross midnight are split, and closed intervals are aggregated with
+overlap clamping, so a day's totals always come from stored data. When retention
+prunes old sessions it first folds their time into daily per-app totals, so the
+day view and the fourteen-day history stay answerable after the raw intervals
+are gone. A day always uses one source: raw intervals when they still exist,
+otherwise the preserved rollup.
 
 GNOME Shell's own surfaces are filtered out: the `gjs` host processes
 (notifications, screen saver), the desktop-icons window, docks and other
@@ -252,9 +341,15 @@ index on `sessions(is_open)` makes two simultaneous open intervals impossible.
 Idle detection uses Mutter's core idle monitor with the configured 1–15 minute
 threshold (5 by default). Lock and presence use GNOME's screen shield signals;
 suspend uses systemd-logind's prepare-for-sleep signal; idle inhibitors (a video,
-a presentation) are respected. The tracker also closes the current interval on a
-wall-clock/monotonic discontinuity, so a missed suspend signal cannot turn sleep
-into usage.
+a presentation) and session-bus MPRIS playback are respected. Presence is not
+trusted forever: when audio or an inhibitor is the only thing keeping a session
+open, it ends at the last input plus two hours. The tracker then waits for real
+input before starting a new session, and the status line explains the cap. If
+input was recent, tracking continues normally and the session records whether
+input, audio, an inhibitor or a mix kept it open. The stored presence is shown
+quietly in the Day view; it is not a score. The tracker also closes the current
+interval on a wall-clock/monotonic discontinuity, so a missed suspend signal
+cannot turn sleep into usage.
 
 If the companion stops reporting, Daymark stops recording rather than guessing;
 the dashboard says so and links back to setup.
@@ -268,10 +363,16 @@ the dashboard says so and links back to setup.
 - Logs: `$XDG_STATE_HOME/daymark/logs` (fallback
   `~/.local/state/daymark/logs`), daily files kept for seven days. They contain
   counts, timings and error text only.
-- Retention: 90 days, 1 year (default), or forever. Pruning removes old sessions
-  and orphaned application rows.
+- Retention: 90 days, 1 year (default), or forever. Pruning folds old sessions
+  into daily per-app totals before deleting the raw intervals, then removes
+  orphaned application rows. The Day view marks those days **Totals only**.
 - No analytics, telemetry, network access, window titles, keystrokes,
   screenshots or clipboard contents.
+- Site names is off by default. When enabled, Daymark reads local browser
+  history read-only from Firefox, Chrome, Chromium, Brave and Edge, extracts
+  domains, and stores only the domain and approximate daily seconds. It never
+  stores URLs, paths, queries, page titles or private-window visits. Turning the
+  setting off deletes the stored domains.
 
 A fresh database is 4 KB; the WAL is typically about 40 KB while Daymark runs and
 is checkpointed normally.
@@ -292,40 +393,74 @@ desktop session's Wayland/X11 libraries. The same build runs on Xorg; the old
 `--x11` installer flag is still accepted for compatibility.
 
 `--background` is genuinely invisible: no window, no Slint platform and no event
-loop exist until the interface is requested. The UI is created lazily when you
-open Daymark from the application grid. The tracker still polls the companion
-every two seconds and writes a heartbeat every 30 seconds, so the headless
-process is low-idle, not zero-wakeup.
+loop exist until the interface is requested. The tray is not created either;
+it starts with the first interface and stays for as long as the process keeps
+that interface alive. The UI is created lazily when you open Daymark from the
+application grid. The tracker still watches the companion file and writes a
+heartbeat every 30 seconds, so the headless process wakes on changes rather
+than polling twice a second. It keeps a 30-second timeout for a missed event,
+and falls back to the two-second poll if the watch cannot be created.
 
 ## Verification
 
-- `cargo test --lib`: **69 passed** — date/DST arithmetic and midnight bounds,
-  interval overlap and hourly aggregation, idle-gap exclusion, per-app totals,
-  averages, JSON parsing (including the seconds/milliseconds compatibility
+- `cargo test --lib`: **145 passed** — date/DST arithmetic and midnight bounds,
+  interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
+  across midnight, idle-gap exclusion, per-app totals, day metrics and timeline
+  segmentation (empty days, gaps, overlaps, after-midnight and cross-midnight
+  sessions), averages, raw-and-rollup day merging (raw intervals win, a
+  rolled-up day is totals only, an old empty day stays empty), JSON parsing
+  (including the seconds/milliseconds compatibility
   path), desktop-entry parsing (quoted `Exec`, `NoDisplay`, hidden entries),
   shell-window filtering, SQLite persistence, legacy-row migration, corruption
-  recovery, crash recovery, at-most-one-open-session, pruning, settings, single
+  recovery, crash recovery, at-most-one-open-session, pruning, daily rollup
+  preservation, repeated-prune safety, cross-midnight rollup, settings, single
   instance, tracker focus/pause/idle behavior, log rotation, extension copy
   selection (system-wide preferred, user folder as fallback), doctor reading the
   packaged system-wide companion and its version, the first-run decision,
   autostart-entry consent parsing (a deliberately disabled entry is left alone),
-  and read-only doctor/status formatting against a temporary database with its
-  write connection still open.
+  read-only doctor/status formatting against a temporary database with its
+  write connection still open, the inotify wait decision (event versus timeout),
+  the 30-second watch versus the two-second fallback, the required watch mask,
+  a real watcher waking on a state-file write, an atomic replacement and a
+  deletion, wake-pipe interruption, a private runtime directory, an unwatchable
+  path, the audio/inhibitor presence cap (recent input, the two-hour cap, the
+  latch, and lock/idle precedence), session presence persistence and the schema
+  v4 migration, the weekly digest computation, notification payload and
+  preference round-trip, digest delivery and once-a-day gating, local APT
+  policy/status parsing with numeric version comparison, app alias and ignore
+  storage, share labels, visible-row filtering that keeps the day total honest,
+  the startup icon-backfill selection, privacy-safe domain extraction, browser
+  history reading and domain storage/scanning, and the pause command encoding
+  and socket-line mapping.
+- `cargo test --bin daymark`: **8 passed** — tray menu order and the
+  paused-only Resume item, pause preset to seconds and socket command mapping,
+  expired-pause display, the minute poll key, tooltip text, and the distinct
+  running/paused generated icons. These are pure tests and start no D-Bus
+  service.
+- The watch path was exercised with a real inotify watcher against temporary
+  runtime directories. The live handoff from a GNOME companion focus change to
+  the next tracker tick still needs a session with the companion loaded.
+- The arm64 `.deb` and aarch64 `.rpm` were cross-built locally and installed
+  under QEMU on Ubuntu 24.04 arm64 and Fedora 42 arm64; both ran
+  `daymark --version`. Native arm64 GUI, GNOME and performance behavior remain
+  untested.
 - The release binary was run on a live GNOME 50.1 Wayland session. The window
   reaches GNOME with app id/WM class `daymark`, so the shell matches it to the
   desktop entry and the companion reports `daymark.desktop` instead of an
   "Unknown" window-backed app.
 - `--background` created no window and no Slint event loop. A 60-second run of
-  `scripts/measure.sh` with temporary XDG directories measured **7.9 MiB RSS,
-  0.00% CPU, 0.48 wakeups/s and 3 threads**; repeated runs ranged from 7.4 to
-  8.2 MiB. A second launch shows the running
-  instance; `--quit` stops it cleanly.
+  `scripts/measure.sh` with temporary XDG directories measured **6.7–8.2 MiB RSS,
+  0.00% CPU, 0.03 wakeups/s and 3 threads**; the single periodic wake is the
+  30-second watch safety check. A second launch shows the running instance;
+  `--quit` stops it cleanly.
 - Closing the window leaves it unmapped, stops the 700 ms refresh timer, and
   still handles Show and Quit over the local socket. In the same live session
   (X11 backend on XWayland; native Wayland destroys the hidden surface instead),
   the hidden process held 23.8 MiB RSS at 0.00% CPU and 2.5 wakeups/s, down from
-  3.9/s with the window open. The remaining wakeups are the tracker poll and
-  event-loop housekeeping, so hidden-after-close is not a zero-wakeup state.
+  3.9/s with the window open. That sample predates the watch, so its tracker
+  share is now event-driven rather than a two-second poll; the remaining
+  wakeups are event-loop housekeeping, and hidden-after-close is still not a
+  zero-wakeup state.
 - The one-time migration ran on the live database (a backup copy was taken
   first): the `gjs` row and its sessions were removed and the
   `wm_class:com.t3tools.t3code` fallback row was merged into
@@ -334,38 +469,43 @@ process is low-idle, not zero-wakeup.
   the state file, advanced its heartbeat, honored the idle threshold, reported
   `away`, and shut down cleanly.
 - Visual states (light, dark, populated, empty, first run, setup, history,
-  settings, error and focused search) were rendered through the application's
-  own software renderer at 1120×780 and 900×620 and inspected. Snapshots are
-  written opaque, so the images in `docs/` display correctly everywhere.
+  history with rolled-up days, totals-only day, presence, settings, error and
+  focused search) were rendered through the application's own software renderer
+  at 1120×780 and 900×620 and inspected. Snapshots are written opaque, so the
+  images in `docs/` display correctly everywhere.
 
 ## Measured results
 
-Measured on Ubuntu 26.04, GNOME Shell 50.1, Wayland, x86_64, release build:
+Measured on Ubuntu 26.04, GNOME Shell 50.1, Wayland, x86_64, release build.
+The headless rows are from the watch build; the visible and hidden rows were
+sampled before it, so their tracker poll is now event-driven. The visible and
+hidden rows also predate the tray; the tray adds a small D-Bus client only while
+the interface exists, and the headless rows never start it.
 
 | Item | Result |
 | --- | ---: |
-| Stripped executable | **8,936,816 bytes (8.52 MiB)** |
-| Installed application files (binary, icon, entries, extension) | ≈ 8.9 MB |
+| Stripped executable | **10,745,392 bytes (10.25 MiB)** |
+| Installed application files (binary, icon, entries, extension) | ≈ 10.3 MB |
 | Fresh database | 4 KB |
-| Headless RSS (`--background`) | 7.4–8.2 MB across runs (≈ 8 MB) |
+| Headless RSS (`--background`) | 6.7–8.2 MiB across runs (≈ 8 MB) |
 | Headless CPU, 60 s sample | 0.00% |
-| Headless wakeups | 0.48/s (the tracker poll) |
+| Headless wakeups | 0.03/s (the 30-second safety check) |
 | Visible RSS | ≈ 23.8 MB |
 | Visible CPU, 20 s sample | 0.00% |
 | Visible wakeups | ≈ 3.9/s |
 | Hidden-after-close RSS | ≈ 23.8 MB |
 | Hidden-after-close CPU | 0.00% (0 ticks at 100 Hz) |
-| Hidden-after-close wakeups | ≈ 2.5/s |
+| Hidden-after-close wakeups (pre-watch) | ≈ 2.5/s |
 | Threads | 3 headless / 10 with the interface |
 
 Headless numbers come from `scripts/measure.sh --seconds 60`, which starts the
 release binary with temporary XDG directories and asks it to quit over its own
 socket. The other rows were sampled the same way on a live session with the
 X11 backend on XWayland; native Wayland destroys the hidden surface instead, so
-its memory can be lower while the tracker poll remains. Wakeups are total
-voluntary context switches per second across every thread, not just the main
-thread. CPU is from `/proc/<pid>/stat` (`utime+stime` ticks / 100 Hz / interval);
-RSS is from `/proc/<pid>/status`; samples were taken after a 5 second settle.
+its memory can be lower. Wakeups are total voluntary context switches per second
+across every thread, not just the main thread. CPU is from `/proc/<pid>/stat`
+(`utime+stime` ticks / 100 Hz / interval); RSS is from `/proc/<pid>/status`;
+samples were taken after a 5 second settle.
 Dynamic dependencies: `libc`, `libm`, `libgcc_s`; the GNOME/Wayland libraries
 are already part of the session. SQLite is compiled in. The binary sits below
 the 10 MB budget; that budget paid for SVG icons, AccessKit accessibility and
@@ -383,6 +523,10 @@ the X11 backend.
   defence.
 - Lock and suspend handling is implemented against GNOME's screen shield and
   logind signals; the idle path is covered by the headless integration test.
+- Audio presence depends on a player exposing `org.mpris.MediaPlayer2` on the
+  session bus. A player that does not use MPRIS is invisible to the cap, so the
+  timer falls back to plain idle detection. A live GNOME session is needed to
+  confirm playback, pause and player-exit behavior end to end.
 - Accessibility exposes roles and labels (AccessKit), not a hand-tuned
   screen-reader reading order. Contrast, large targets and full keyboard
   shortcuts are provided.
@@ -404,6 +548,7 @@ src/date.rs           local dates, DST-safe boundaries, formatting
 src/json.rs           tiny JSON reader for the companion state
 src/platform.rs       autostart, extension install, theme detection
 src/instance.rs       flock + Unix socket IPC
+src/tray.rs           optional StatusNotifierItem tray and its icon
 ui/                   Slint dashboard and design tokens
 extension/            GNOME Shell companion (GJS)
 media/                Remotion project for the tour above

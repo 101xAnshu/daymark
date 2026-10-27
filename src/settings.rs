@@ -50,6 +50,13 @@ pub struct Settings {
     /// and after the sheet has been shown (or was not needed) on the first
     /// visible launch.
     pub first_run_complete: bool,
+    /// Send one local notification a week with the previous week's totals.
+    pub digest_enabled: bool,
+    /// Start timestamp of the last week end delivered, or 0 when never sent.
+    pub digest_last_sent: i64,
+    /// Read browser history read-only to show domain-only site names. Off by
+    /// default; the V1 privacy promise is unchanged until this is enabled.
+    pub site_names_enabled: bool,
 }
 
 impl Default for Settings {
@@ -62,6 +69,9 @@ impl Default for Settings {
             retention_days: 365,
             theme: ThemePref::System,
             first_run_complete: false,
+            digest_enabled: false,
+            digest_last_sent: 0,
+            site_names_enabled: false,
         }
     }
 }
@@ -99,6 +109,18 @@ impl Settings {
         }
         if let Some(v) = store.get_setting("first_run_complete") {
             s.first_run_complete = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Some(v) = store.get_setting("digest_enabled") {
+            s.digest_enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Some(v) = store
+            .get_setting("digest_last_sent")
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            s.digest_last_sent = v.max(0);
+        }
+        if let Some(v) = store.get_setting("site_names_enabled") {
+            s.site_names_enabled = v == "1" || v.eq_ignore_ascii_case("true");
         }
         s
     }
@@ -141,6 +163,19 @@ impl Settings {
                 store.set_setting(
                     "first_run_complete",
                     if self.first_run_complete { "1" } else { "0" },
+                )
+            })
+            .and_then(|_| {
+                store.set_setting(
+                    "digest_enabled",
+                    if self.digest_enabled { "1" } else { "0" },
+                )
+            })
+            .and_then(|_| store.set_setting("digest_last_sent", &self.digest_last_sent.to_string()))
+            .and_then(|_| {
+                store.set_setting(
+                    "site_names_enabled",
+                    if self.site_names_enabled { "1" } else { "0" },
                 )
             })
     }
@@ -305,5 +340,40 @@ mod tests {
             store.get_setting("first_run_complete").as_deref(),
             Some("1")
         );
+    }
+
+    #[test]
+    fn the_weekly_digest_preference_round_trips() {
+        let dir = TempDb::new("digest");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let fresh = Settings::load(&store);
+        assert!(!fresh.digest_enabled, "the digest is opt-in");
+        assert_eq!(fresh.digest_last_sent, 0);
+
+        let sent = crate::date::Day::today().start_ts();
+        let enabled = Settings {
+            digest_enabled: true,
+            digest_last_sent: sent,
+            ..Settings::default()
+        };
+        enabled.save(&store).unwrap();
+
+        let reloaded = Settings::load(&store);
+        assert!(reloaded.digest_enabled);
+        assert_eq!(reloaded.digest_last_sent, sent);
+    }
+
+    #[test]
+    fn site_names_are_opt_in_and_round_trip() {
+        let dir = TempDb::new("sites");
+        let store = Store::open_at(&dir.db()).unwrap();
+        assert!(!Settings::load(&store).site_names_enabled);
+
+        let enabled = Settings {
+            site_names_enabled: true,
+            ..Settings::default()
+        };
+        enabled.save(&store).unwrap();
+        assert!(Settings::load(&store).site_names_enabled);
     }
 }

@@ -2,10 +2,10 @@
 //! Slint dashboard consumes, and handles user actions.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,12 +13,19 @@ use slint::{ComponentHandle, Image, ModelRc, SharedPixelBuffer, VecModel};
 
 use crate::date::{self, Day};
 use crate::db::{self, AppInfo, Store};
-use crate::instance::{COMMAND_NONE, COMMAND_QUIT, COMMAND_SHOW};
+use crate::desktop::DesktopIndex;
+use crate::instance::{
+    COMMAND_NONE, COMMAND_PAUSE, COMMAND_QUIT, COMMAND_RESUME, COMMAND_SHOW, MAX_PAUSE_SECONDS,
+    command_kind, pause_seconds,
+};
 use crate::logging;
 use crate::settings::{self, Settings, ThemePref};
-use crate::stats::{self, SessionRow};
-use crate::tracker::{self, LiveState, TrackerHandle, TrackingStatus};
-use crate::{AppRow, AppWindow, DayBar, HistoryRow, HourBar, Theme};
+use crate::stats::{self, RollupTotal, SessionRow};
+use crate::tracker::{self, LiveState, Presence, TrackerHandle, TrackingStatus};
+use crate::{
+    AppRow, AppWindow, DayBar, HeatCell, HeatRow, HistoryRow, HourBar, MetricRow, SiteRow, Theme,
+    TimelineSegment,
+};
 
 const HISTORY_DAYS: i32 = 14;
 /// Decoded icons are kept small; the UI shows them in a 28 pt tile.
@@ -197,6 +204,44 @@ fn initial(name: &str) -> String {
         .unwrap_or_else(|| "•".into())
 }
 
+/// A user-chosen alias when present, otherwise the recorded application name.
+/// A blank or whitespace-only alias never hides the real name.
+fn display_name<'a>(alias: Option<&'a str>, name: &'a str) -> &'a str {
+    alias
+        .map(str::trim)
+        .filter(|alias| !alias.is_empty())
+        .unwrap_or(name)
+}
+
+/// One pass over apps whose icon reference is missing. The resolver is kept
+/// separate so the selection and update can be tested without a live desktop
+/// index.
+fn backfill_icons_with(store: &Store, resolve: impl Fn(&AppInfo) -> Option<String>) -> usize {
+    let Ok(apps) = store.apps_missing_icons() else {
+        return 0;
+    };
+    let mut updated = 0;
+    for app in apps {
+        if let Some(icon) = resolve(&app) {
+            if store.set_app_icon(app.id, &icon).is_ok() {
+                updated += 1;
+            }
+        }
+    }
+    updated
+}
+
+/// Resolve missing icons once at startup. The app keeps recording normally if
+/// the desktop index is unavailable.
+fn backfill_icons(store: &Store) {
+    let index = DesktopIndex::load();
+    backfill_icons_with(store, |info| {
+        index
+            .resolve(&info.key, None, Some(info.name.as_str()))
+            .icon
+    });
+}
+
 fn peak_label(hour: u32) -> String {
     let next = (hour + 1) % 24;
     let a = if hour == 0 {
@@ -247,7 +292,7 @@ pub struct AppController {
     theme_watch_live: bool,
     last_theme_poll: Instant,
     restore_maximized: bool,
-    command: Option<Arc<AtomicU8>>,
+    command: Option<Arc<AtomicU64>>,
     /// Set while the window is hidden to the background. Slint's own
     /// `is_visible()` stays true for the `hide_without_quitting` backport, so
     /// the controller tracks the lifecycle itself.
@@ -255,6 +300,13 @@ pub struct AppController {
     /// Seconds left on the current timed pause, or 0 when there is none.
     pause_remaining: i64,
     last_pause_status: String,
+    /// A local APT update notice, empty when no newer candidate exists.
+    update_notice: String,
+    /// Reveal ignored apps in the Day list so they can be edited again.
+    show_ignored: bool,
+    editing_app: Option<i64>,
+    editor_alias: String,
+    editor_ignored: bool,
 }
 
 impl AppController {
@@ -263,7 +315,7 @@ impl AppController {
         store: Option<Store>,
         tracker: Option<TrackerHandle>,
         settings: Settings,
-        command: Option<Arc<AtomicU8>>,
+        command: Option<Arc<AtomicU64>>,
     ) -> Rc<RefCell<Self>> {
         let dark = match settings.theme {
             ThemePref::Light => false,
@@ -281,6 +333,17 @@ impl AppController {
         } else {
             String::new()
         };
+        let update_notice = crate::update::available_update()
+            .map(|update| {
+                format!(
+                    "Daymark {} is available. Update with your package manager.",
+                    update.candidate
+                )
+            })
+            .unwrap_or_default();
+        if let Some(store) = &store {
+            backfill_icons(store);
+        }
         let controller = Rc::new(RefCell::new(Self {
             ui,
             store,
@@ -315,6 +378,11 @@ impl AppController {
             window_hidden: false,
             pause_remaining: 0,
             last_pause_status: String::new(),
+            update_notice,
+            show_ignored: false,
+            editing_app: None,
+            editor_alias: String::new(),
+            editor_ignored: false,
         }));
 
         if let Some(icon) = search_icon() {
@@ -343,6 +411,10 @@ impl AppController {
             .set_retention_days(self.settings.retention_days as i32);
         self.ui.set_theme_pref(self.settings.theme.index());
         self.ui.set_autostart(self.settings.autostart);
+        self.ui.set_digest_enabled(self.settings.digest_enabled);
+        self.ui
+            .set_site_names_enabled(self.settings.site_names_enabled);
+        self.ui.set_update_notice(self.update_notice.clone().into());
         self.ui
             .set_settings_error(self.settings_error.clone().into());
         self.ui.set_setup_ready(self.setup_ready);
@@ -388,6 +460,19 @@ impl AppController {
             self.ui
                 .set_hours(ModelRc::new(VecModel::from(Vec::<HourBar>::new())));
             self.ui
+                .set_metrics(ModelRc::new(VecModel::from(Vec::<MetricRow>::new())));
+            self.ui
+                .set_timeline(ModelRc::new(VecModel::from(Vec::<TimelineSegment>::new())));
+            self.ui.set_has_timeline(false);
+            self.ui.set_totals_only(false);
+            self.ui
+                .set_heatmap(ModelRc::new(VecModel::from(Vec::<HeatRow>::new())));
+            self.ui.set_heatmap_total("".into());
+            self.ui.set_has_heatmap(false);
+            self.ui
+                .set_sites(ModelRc::new(VecModel::from(Vec::<SiteRow>::new())));
+            self.ui.set_presence_note("".into());
+            self.ui
                 .set_history(ModelRc::new(VecModel::from(Vec::<HistoryRow>::new())));
             self.last_refresh = Instant::now();
             self.force_refresh = false;
@@ -395,17 +480,19 @@ impl AppController {
         };
 
         // A query window large enough for the weekly chart, the previous day
-        // and a seven-day average, without touching the whole database.
+        // and a seven-day average, without touching the whole database. The
+        // store returns raw intervals and preserved daily totals together; a
+        // day answered from its rollup never also counts its old intervals.
         let query_start = day.add_days(-8).start_ts();
         let query_end = day.end_ts();
-        let mut rows = store
-            .sessions_between(query_start, query_end)
+        let mut day_data = store
+            .day_data_between(query_start, query_end)
             .unwrap_or_default();
         let mut live_info: Option<AppInfo> = None;
         if let Some(current) = &live.current {
             let end = current.started.saturating_add(current.elapsed.max(0));
             if end > current.started && end > query_start && current.started < query_end {
-                rows.push(SessionRow {
+                day_data.rows.push(SessionRow {
                     app_id: current.app_id,
                     started: current.started,
                     ended: end,
@@ -417,14 +504,22 @@ impl AppController {
                 name: current.name.clone(),
                 icon: current.icon.clone(),
                 desktop_id: None,
+                alias: None,
+                ignored: false,
             });
         }
+        let rollups = day_data.rollups;
+        let rows = day_data.rows;
+        let day_totals = stats::day_totals(&rows, &rollups, day);
+        let totals_only = day_totals.totals_only();
+        self.ui.set_totals_only(totals_only);
         let mut app_infos = {
             let ids: Vec<i64> = {
                 let mut seen = std::collections::HashSet::new();
                 rows.iter()
-                    .filter(|r| seen.insert(r.app_id))
                     .map(|r| r.app_id)
+                    .chain(rollups.iter().map(|r| r.app_id))
+                    .filter(|id| seen.insert(*id))
                     .collect()
             };
             store.app_infos(&ids)
@@ -435,7 +530,7 @@ impl AppController {
 
         let day_agg = stats::aggregate_day(&rows, day);
         self.ui
-            .set_total_text(date::format_duration(day_agg.total).into());
+            .set_total_text(date::format_duration(day_totals.total).into());
         self.ui.set_has_any_data(store.has_any_sessions());
         self.ui.set_date_kicker(
             if self.selected_offset == 0 {
@@ -446,11 +541,135 @@ impl AppController {
             .into(),
         );
         self.ui.set_compare_text(
-            self.comparison_text(&rows, day, day_agg.total, store)
+            self.comparison_text(&rows, &rollups, day, day_totals.total, store)
                 .into(),
         );
 
-        let week_totals = stats::totals_ending_at(&rows, day, 7);
+        // A quiet, factual row: no scores or targets, only what the stored
+        // intervals already say about the selected day. A rolled-up day has no
+        // intervals, so only the metrics a daily total can support are shown.
+        let app_count = day_totals.apps.len();
+        let mut metrics = Vec::new();
+        if !totals_only {
+            let stretch = stats::longest_stretch(&rows, day);
+            let after_midnight = stats::after_midnight_seconds(&rows, day);
+            metrics.push(MetricRow {
+                label: "Longest stretch".into(),
+                value: if stretch > 0 {
+                    date::format_duration(stretch)
+                } else {
+                    "—".to_string()
+                }
+                .into(),
+                detail: "uninterrupted".into(),
+                show_rule: false,
+                accent: false,
+            });
+            metrics.push(MetricRow {
+                label: "Apps".into(),
+                value: app_count.to_string().into(),
+                detail: "distinct".into(),
+                show_rule: true,
+                accent: false,
+            });
+            metrics.push(MetricRow {
+                label: "After midnight".into(),
+                value: if after_midnight > 0 {
+                    date::format_duration(after_midnight)
+                } else {
+                    "None".to_string()
+                }
+                .into(),
+                detail: format!("00:00–{:02}:00", stats::AFTER_MIDNIGHT_HOURS).into(),
+                show_rule: true,
+                accent: false,
+            });
+        } else {
+            metrics.push(MetricRow {
+                label: "Apps".into(),
+                value: app_count.to_string().into(),
+                detail: "distinct".into(),
+                show_rule: false,
+                accent: false,
+            });
+        }
+        let (week_value, week_detail) = match stats::week_delta_with_rollups(&rows, &rollups, day) {
+            Some(delta) if delta.abs() < 300 => ("Even".to_string(), "same weekday"),
+            Some(delta) => (
+                format!(
+                    "{}{}",
+                    if delta > 0 { "+" } else { "−" },
+                    date::format_delta(delta)
+                ),
+                "same weekday",
+            ),
+            None => ("—".to_string(), "no prior week"),
+        };
+        metrics.push(MetricRow {
+            label: "vs last week".into(),
+            value: week_value.into(),
+            detail: week_detail.into(),
+            show_rule: true,
+            accent: false,
+        });
+        // The Now cell is only honest for today with a session in progress.
+        if self.selected_offset == 0 {
+            if let Some(current) = &live.current {
+                metrics.push(MetricRow {
+                    label: "Now".into(),
+                    value: current.name.clone().into(),
+                    detail: format!("{} so far", date::format_duration(current.elapsed.max(0)))
+                        .into(),
+                    show_rule: true,
+                    accent: true,
+                });
+            }
+        }
+        self.ui.set_metrics(ModelRc::new(VecModel::from(metrics)));
+
+        // Presence is a quiet note, not a metric: the row above is already
+        // full at the 900 px minimum width. The live interval is excluded from
+        // stored day rows, so add it separately when it has presence. A rolled
+        // up day carries no presence information at all.
+        let mut presence_seconds = if totals_only {
+            0
+        } else {
+            store
+                .presence_seconds_between(day.start_ts(), day.end_ts())
+                .unwrap_or(0)
+        };
+        if self.selected_offset == 0 {
+            if let Some(current) = &live.current {
+                if current.presence != Presence::Input {
+                    presence_seconds += current.elapsed.max(0);
+                }
+            }
+        }
+        self.ui
+            .set_presence_note(presence_note(presence_seconds).into());
+
+        let timeline: Vec<TimelineSegment> = if totals_only {
+            Vec::new()
+        } else {
+            stats::timeline_segments(&rows, day)
+                .into_iter()
+                .map(|segment| {
+                    let tint = app_infos
+                        .get(&segment.app_id)
+                        .map(|info| app_tint(&info.key, self.dark))
+                        .unwrap_or_else(|| app_tint(&segment.app_id.to_string(), self.dark));
+                    TimelineSegment {
+                        start: segment.start,
+                        width: (segment.end - segment.start).max(0.0),
+                        tint,
+                    }
+                })
+                .collect()
+        };
+        self.ui.set_has_timeline(!timeline.is_empty());
+        self.ui.set_timeline(ModelRc::new(VecModel::from(timeline)));
+
+        let week_totals = stats::totals_ending_at_with_rollups(&rows, &rollups, day, 7);
         let max_week = week_totals
             .iter()
             .map(|(_, v)| *v)
@@ -491,16 +710,85 @@ impl AppController {
         );
         self.ui.set_week(ModelRc::new(VecModel::from(week_rows)));
 
-        // Application rows, including the current live interval.
-        let total_apps = day_agg.apps.len();
+        // Rhythm: the same seven days, split into local hours. The intensity is
+        // relative to the busiest hour in the window, so quiet weeks still show
+        // their shape instead of going flat. Hourly rollups do not exist, so
+        // this view only has data where raw intervals still do.
+        let heatmap_days = stats::hourly_ending_at(&rows, day, 7);
+        let heat_max = heatmap_days
+            .iter()
+            .flat_map(|(_, hourly)| hourly.iter())
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        let heatmap_total: i64 = heatmap_days
+            .iter()
+            .map(|(_, hourly)| hourly.iter().sum::<i64>())
+            .sum();
+        let heatmap_rows: Vec<HeatRow> = heatmap_days
+            .iter()
+            .map(|(d, hourly)| {
+                let total: i64 = hourly.iter().sum();
+                let cells: Vec<HeatCell> = hourly
+                    .iter()
+                    .map(|seconds| HeatCell {
+                        ratio: (*seconds as f32 / heat_max as f32).clamp(0.0, 1.0),
+                    })
+                    .collect();
+                HeatRow {
+                    label: d.weekday_short().into(),
+                    total: date::format_compact(total).into(),
+                    cells: ModelRc::new(VecModel::from(cells)),
+                }
+            })
+            .collect();
+        self.ui
+            .set_heatmap(ModelRc::new(VecModel::from(heatmap_rows)));
+        self.ui.set_heatmap_total(
+            if heatmap_total > 0 {
+                date::format_duration(heatmap_total)
+            } else {
+                String::new()
+            }
+            .into(),
+        );
+        self.ui.set_has_heatmap(heatmap_total > 0);
+
+        // Application rows, including the current live interval. Ignored apps
+        // lose their row and their share, while the day total keeps every
+        // recorded minute, including the time they contributed.
+        let ignored: HashSet<i64> = app_infos
+            .values()
+            .filter(|info| info.ignored)
+            .map(|info| info.id)
+            .collect();
+        self.ui.set_ignored_app_count(ignored.len() as i32);
+        self.ui.set_show_ignored(self.show_ignored);
+        let (_, visible_apps) = stats::visible_day_apps(&rows, &rollups, day, &ignored);
+        let apps_to_show: Vec<(i64, i64)> = if self.show_ignored {
+            day_totals.apps.clone()
+        } else {
+            visible_apps
+                .iter()
+                .map(|app| (app.app_id, app.seconds))
+                .collect()
+        };
+        let total_apps = apps_to_show.len();
         let query_lower = self.query.to_lowercase();
-        let top = day_agg.apps.first().map(|(_, v)| *v).unwrap_or(1).max(1);
+        let top = apps_to_show
+            .iter()
+            .map(|(_, seconds)| *seconds)
+            .max()
+            .unwrap_or(1)
+            .max(1);
         let mut app_rows = Vec::new();
-        for (app_id, seconds) in &day_agg.apps {
-            let Some(info) = app_infos.get(app_id) else {
+        for (app_id, seconds) in apps_to_show {
+            let Some(info) = app_infos.get(&app_id) else {
                 continue;
             };
-            if !query_lower.is_empty() && !info.name.to_lowercase().contains(&query_lower) {
+            let name = display_name(info.alias.as_deref(), &info.name);
+            if !query_lower.is_empty() && !name.to_lowercase().contains(&query_lower) {
                 continue;
             }
             let tint = app_tint(&info.key, self.dark);
@@ -509,13 +797,16 @@ impl AppController {
                 None => (Image::default(), false),
             };
             app_rows.push(AppRow {
-                name: info.name.clone().into(),
-                duration: date::format_duration(*seconds).into(),
-                ratio: (*seconds as f32 / top as f32).clamp(0.0, 1.0),
-                initial: initial(&info.name).into(),
+                app_id: app_id as i32,
+                name: name.into(),
+                duration: date::format_duration(seconds).into(),
+                share: stats::share_label(seconds, day_totals.total).into(),
+                ratio: (seconds as f32 / top as f32).clamp(0.0, 1.0),
+                initial: initial(name).into(),
                 has_icon,
                 icon,
                 tint,
+                ignored: ignored.contains(&app_id),
             });
         }
         let shown = app_rows.len();
@@ -533,39 +824,77 @@ impl AppController {
         );
         self.ui.set_apps(ModelRc::new(VecModel::from(app_rows)));
 
-        let max_hour = day_agg.hourly.iter().copied().max().unwrap_or(0).max(1);
-        let hours: Vec<HourBar> = day_agg
-            .hourly
-            .iter()
-            .map(|v| HourBar {
-                ratio: (*v as f32 / max_hour as f32).clamp(0.0, 1.0),
-            })
-            .collect();
+        let site_rows: Vec<SiteRow> = if self.settings.site_names_enabled {
+            let totals = store
+                .domain_totals_for_day(day.start_ts())
+                .unwrap_or_default();
+            let max = totals
+                .iter()
+                .map(|(_, seconds)| *seconds)
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            totals
+                .into_iter()
+                .take(5)
+                .map(|(domain, seconds)| SiteRow {
+                    domain: domain.into(),
+                    duration: date::format_duration(seconds).into(),
+                    ratio: (seconds as f32 / max as f32).clamp(0.0, 1.0),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.ui.set_sites(ModelRc::new(VecModel::from(site_rows)));
+
+        let hours: Vec<HourBar> = if totals_only {
+            Vec::new()
+        } else {
+            let max_hour = day_agg.hourly.iter().copied().max().unwrap_or(0).max(1);
+            day_agg
+                .hourly
+                .iter()
+                .map(|v| HourBar {
+                    ratio: (*v as f32 / max_hour as f32).clamp(0.0, 1.0),
+                })
+                .collect()
+        };
         self.ui.set_hours(ModelRc::new(VecModel::from(hours)));
         self.ui.set_peak_text(
-            day_agg
-                .peak_hour()
-                .map(|(h, _)| peak_label(h as u32))
-                .unwrap_or_else(|| "No activity yet".into())
-                .into(),
+            if totals_only {
+                "Totals only".to_string()
+            } else {
+                day_agg
+                    .peak_hour()
+                    .map(|(h, _)| peak_label(h as u32))
+                    .unwrap_or_else(|| "No activity yet".into())
+            }
+            .into(),
         );
 
-        // History: a calm, scannable two-week list.
+        // History: a calm, scannable two-week list. Days whose intervals were
+        // pruned still contribute their preserved totals.
         let history_start = today.add_days(-(HISTORY_DAYS - 1)).start_ts();
-        let mut history_rows = store
-            .sessions_between(history_start, today.end_ts())
+        let mut history_data = store
+            .day_data_between(history_start, today.end_ts())
             .unwrap_or_default();
         if let Some(current) = &live.current {
             let end = current.started.saturating_add(current.elapsed.max(0));
             if end > history_start {
-                history_rows.push(SessionRow {
+                history_data.rows.push(SessionRow {
                     app_id: current.app_id,
                     started: current.started,
                     ended: end,
                 });
             }
         }
-        let history_totals = stats::totals_ending_at(&history_rows, today, HISTORY_DAYS as i64);
+        let history_totals = stats::totals_ending_at_with_rollups(
+            &history_data.rows,
+            &history_data.rollups,
+            today,
+            HISTORY_DAYS as i64,
+        );
         let max_history = history_totals
             .iter()
             .map(|(_, v)| *v)
@@ -664,7 +993,14 @@ impl AppController {
         self.ui.set_pause_status(status.into());
     }
 
-    fn comparison_text(&self, rows: &[SessionRow], day: Day, total: i64, store: &Store) -> String {
+    fn comparison_text(
+        &self,
+        rows: &[SessionRow],
+        rollups: &[RollupTotal],
+        day: Day,
+        total: i64,
+        store: &Store,
+    ) -> String {
         if total <= 0 {
             if !store.has_any_sessions() && self.selected_offset == 0 {
                 return "Nothing recorded yet — usage will appear as you work.".into();
@@ -676,7 +1012,7 @@ impl AppController {
             };
         }
         let yesterday = day.add_days(-1);
-        let previous = stats::total_for_day(rows, yesterday);
+        let previous = stats::total_with_rollups(rows, rollups, yesterday);
         let relation = if self.selected_offset == 0 {
             "yesterday"
         } else {
@@ -694,7 +1030,7 @@ impl AppController {
             );
         }
         // Only use an average when there is enough real history to mean it.
-        let prior = stats::totals_ending_at(rows, yesterday, 7);
+        let prior = stats::totals_ending_at_with_rollups(rows, rollups, yesterday, 7);
         if let Some(avg) = stats::active_day_average(&prior, 3) {
             let diff = total - avg;
             if diff.abs() < 300 {
@@ -718,6 +1054,7 @@ impl AppController {
             TrackingStatus::Waiting => "Waiting for GNOME".into(),
             TrackingStatus::Stale => "Tracking stopped".into(),
             TrackingStatus::Error => "Something needs attention".into(),
+            TrackingStatus::Capped => "Audio or video cap".into(),
         }
     }
 
@@ -767,7 +1104,9 @@ impl AppController {
                 "Try again",
                 2,
             ),
-            TrackingStatus::Active | TrackingStatus::Away => (false, "", "", "", 0),
+            TrackingStatus::Active | TrackingStatus::Away | TrackingStatus::Capped => {
+                (false, "", "", "", 0)
+            }
         };
         let show = show && !self.setup_open && !self.settings_open;
         self.ui.set_show_banner(show);
@@ -812,7 +1151,7 @@ impl AppController {
             let c = controller.clone();
             controller.borrow().ui.on_set_view(move |view| {
                 let mut ctl = c.borrow_mut();
-                ctl.view = if view == 1 { 1 } else { 0 };
+                ctl.view = view.clamp(0, 2);
                 ctl.force_refresh = true;
                 ctl.refresh();
             });
@@ -872,10 +1211,7 @@ impl AppController {
             let c = controller.clone();
             controller.borrow().ui.on_resume_tracking(move || {
                 let mut ctl = c.borrow_mut();
-                ctl.settings.paused = false;
-                ctl.settings.paused_until = 0;
-                ctl.save_settings();
-                ctl.force_refresh = true;
+                ctl.apply_resume();
                 ctl.refresh();
             });
         }
@@ -943,6 +1279,141 @@ impl AppController {
         }
         {
             let c = controller.clone();
+            controller
+                .borrow()
+                .ui
+                .on_set_digest_enabled(move |enabled| {
+                    let mut ctl = c.borrow_mut();
+                    ctl.settings.digest_enabled = enabled;
+                    if enabled {
+                        if let Some(store) = &ctl.store {
+                            let mut settings = ctl.settings.clone();
+                            match crate::digest::deliver_if_due(store, &mut settings, Day::today())
+                            {
+                                Ok(true) => {
+                                    ctl.settings.digest_last_sent = settings.digest_last_sent;
+                                }
+                                Ok(false) => {}
+                                Err(error) => logging::error("digest", &error),
+                            }
+                        }
+                    }
+                    ctl.save_settings();
+                    ctl.force_refresh = true;
+                    ctl.refresh();
+                });
+        }
+        {
+            let c = controller.clone();
+            controller
+                .borrow()
+                .ui
+                .on_set_site_names_enabled(move |enabled| {
+                    let mut ctl = c.borrow_mut();
+                    ctl.settings.site_names_enabled = enabled;
+                    let mut error_message = None;
+                    if let Some(store) = &ctl.store {
+                        if enabled {
+                            match std::env::var_os("HOME").map(PathBuf::from) {
+                                Some(home) => {
+                                    match crate::sites::scan_and_store(
+                                        store,
+                                        &home,
+                                        Day::today(),
+                                        14,
+                                    ) {
+                                        Ok(_) => {}
+                                        Err(error) => {
+                                            logging::error("sites", &error);
+                                            error_message = Some(format!(
+                                                "Could not read browser history: {error}"
+                                            ));
+                                        }
+                                    }
+                                }
+                                None => {
+                                    error_message =
+                                        Some("Could not find the home folder.".to_string());
+                                }
+                            }
+                        } else if let Err(error) = store.clear_domain_totals() {
+                            logging::error("sites", &error);
+                        }
+                    }
+                    if let Some(error) = error_message {
+                        ctl.settings_error = error;
+                    } else {
+                        ctl.settings_error.clear();
+                    }
+                    ctl.save_settings();
+                    ctl.force_refresh = true;
+                    ctl.refresh();
+                });
+        }
+        {
+            let c = controller.clone();
+            controller.borrow().ui.on_edit_app(move |app_id| {
+                let mut ctl = c.borrow_mut();
+                ctl.edit_app(app_id as i64);
+            });
+        }
+        {
+            let c = controller.clone();
+            controller.borrow().ui.on_close_app_editor(move || {
+                let mut ctl = c.borrow_mut();
+                ctl.editing_app = None;
+                ctl.ui.set_app_editor_open(false);
+            });
+        }
+        {
+            let c = controller.clone();
+            controller.borrow().ui.on_set_app_ignored(move |ignored| {
+                let mut ctl = c.borrow_mut();
+                ctl.editor_ignored = ignored;
+                ctl.ui.set_app_editor_ignored(ignored);
+            });
+        }
+        {
+            let c = controller.clone();
+            controller.borrow().ui.on_save_app_alias(move |alias| {
+                let mut ctl = c.borrow_mut();
+                let Some(id) = ctl.editing_app else {
+                    return;
+                };
+                let ignored = ctl.editor_ignored;
+                let mut save_error = None;
+                if let Some(store) = &ctl.store {
+                    let alias = alias.trim();
+                    let alias = if alias.is_empty() { None } else { Some(alias) };
+                    if let Err(error) = store.set_app_alias(id, alias) {
+                        logging::error("alias", &error);
+                        save_error = Some(format!("Could not save the display name: {error}"));
+                    }
+                    if let Err(error) = store.set_app_ignored(id, ignored) {
+                        logging::error("ignore", &error);
+                        save_error = Some(format!("Could not save the ignore rule: {error}"));
+                    }
+                }
+                if let Some(error) = save_error {
+                    ctl.settings_error = error;
+                }
+                ctl.editing_app = None;
+                ctl.ui.set_app_editor_open(false);
+                ctl.force_refresh = true;
+                ctl.refresh();
+            });
+        }
+        {
+            let c = controller.clone();
+            controller.borrow().ui.on_toggle_show_ignored(move || {
+                let mut ctl = c.borrow_mut();
+                ctl.show_ignored = !ctl.show_ignored;
+                ctl.force_refresh = true;
+                ctl.refresh();
+            });
+        }
+        {
+            let c = controller.clone();
             controller.borrow().ui.on_set_autostart(move |enabled| {
                 let mut ctl = c.borrow_mut();
                 ctl.settings.autostart = enabled;
@@ -966,14 +1437,7 @@ impl AppController {
             // `seconds` is the pause length; 0 means "until resumed".
             controller.borrow().ui.on_pause_for(move |seconds| {
                 let mut ctl = c.borrow_mut();
-                ctl.settings.paused = true;
-                ctl.settings.paused_until = if seconds > 0 {
-                    crate::date::unix_now() + seconds as i64
-                } else {
-                    0
-                };
-                ctl.save_settings();
-                ctl.force_refresh = true;
+                ctl.apply_pause(seconds as i64);
                 ctl.refresh();
             });
         }
@@ -1072,6 +1536,50 @@ impl AppController {
         }
     }
 
+    /// Apply a pause from the tray or the settings sheet. Zero seconds means
+    /// "until resumed". The tracker is updated through the normal settings
+    /// path so it stops counting immediately.
+    fn apply_pause(&mut self, seconds: i64) {
+        self.settings.paused = true;
+        self.settings.paused_until = pause_deadline(crate::date::unix_now(), seconds);
+        self.save_settings();
+        self.force_refresh = true;
+    }
+
+    fn apply_resume(&mut self) {
+        self.settings.paused = false;
+        self.settings.paused_until = 0;
+        self.save_settings();
+        self.force_refresh = true;
+    }
+
+    fn edit_app(&mut self, id: i64) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let Some(info) = store.app_infos(&[id]).remove(&id) else {
+            return;
+        };
+        self.editing_app = Some(id);
+        self.editor_alias = info.alias.clone().unwrap_or_default();
+        self.editor_ignored = info.ignored;
+        self.ui.set_app_editor_name(info.name.clone().into());
+        self.ui
+            .set_app_editor_alias(self.editor_alias.clone().into());
+        self.ui.set_app_editor_ignored(info.ignored);
+        self.ui.set_app_editor_open(true);
+    }
+
+    pub fn edit_app_for_render(&mut self, id: i64) {
+        self.edit_app(id);
+    }
+
+    pub fn show_ignored_for_render(&mut self, show: bool) {
+        self.show_ignored = show;
+        self.force_refresh = true;
+        self.refresh();
+    }
+
     fn save_settings(&mut self) {
         if let Some(store) = &self.store {
             if let Err(e) = self.settings.save(store) {
@@ -1128,7 +1636,8 @@ impl AppController {
     /// Called by the UI timer. Only refreshes when something visible changed.
     pub fn tick(&mut self) {
         if let Some(command) = &self.command {
-            match command.swap(COMMAND_NONE, Ordering::SeqCst) {
+            let value = command.swap(COMMAND_NONE, Ordering::SeqCst);
+            match command_kind(value) {
                 COMMAND_SHOW => {
                     self.force_refresh = true;
                     self.last_theme_poll = Instant::now() - Duration::from_secs(30);
@@ -1145,6 +1654,12 @@ impl AppController {
                 COMMAND_QUIT => {
                     self.quit();
                     return;
+                }
+                COMMAND_PAUSE => {
+                    self.apply_pause(pause_seconds(value));
+                }
+                COMMAND_RESUME => {
+                    self.apply_resume();
                 }
                 _ => {}
             }
@@ -1396,6 +1911,30 @@ fn today_offset(today: Day, day: Day) -> i32 {
     (diff as f64 / 86_400.0).round() as i32
 }
 
+/// A quiet, non-judgemental note for the Day view. Empty when no recorded
+/// session had audio or an idle inhibitor, so the line costs no space.
+fn presence_note(seconds: i64) -> String {
+    if seconds <= 0 {
+        return String::new();
+    }
+    format!(
+        "{} with audio or a video playing",
+        date::format_duration(seconds)
+    )
+}
+
+/// Deadline for a pause starting now. Zero length means "until resumed" and
+/// therefore has no deadline. Bounded like the socket parser so a malformed
+/// command cannot arm a pause far in the future.
+fn pause_deadline(now: i64, seconds: i64) -> i64 {
+    let seconds = seconds.clamp(0, MAX_PAUSE_SECONDS);
+    if seconds > 0 {
+        now.saturating_add(seconds)
+    } else {
+        0
+    }
+}
+
 /// One-line description of the pause state for the settings panel and the
 /// background-resume path: empty while tracking runs.
 fn pause_status_line(paused: bool, remaining: i64) -> String {
@@ -1406,5 +1945,96 @@ fn pause_status_line(paused: bool, remaining: i64) -> String {
         format!("Paused — {} remaining", date::format_duration(remaining))
     } else {
         "Paused until you resume".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_PAUSE_SECONDS, backfill_icons_with, display_name, pause_deadline, presence_note,
+    };
+    use crate::db::Store;
+    use crate::desktop::ResolvedApp;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "daymark-app-{tag}-{}-{:?}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn db(&self) -> PathBuf {
+            self.0.join("daymark.db")
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn app(key: &str) -> ResolvedApp {
+        ResolvedApp {
+            key: key.into(),
+            name: key.into(),
+            icon: None,
+            desktop_id: None,
+            wm_class: None,
+            matched: false,
+        }
+    }
+
+    #[test]
+    fn presence_note_is_quiet_and_hidden_at_zero() {
+        assert_eq!(presence_note(0), "");
+        assert_eq!(presence_note(-10), "");
+        assert_eq!(presence_note(12 * 60), "12m with audio or a video playing");
+        assert_eq!(presence_note(3600), "1h with audio or a video playing");
+    }
+
+    #[test]
+    fn pause_deadline_handles_presets_and_bounds() {
+        assert_eq!(pause_deadline(1_000, 0), 0, "until resumed");
+        assert_eq!(pause_deadline(1_000, -5), 0);
+        assert_eq!(pause_deadline(1_000, 900), 1_900);
+        assert_eq!(pause_deadline(1_000, 3_600), 4_600);
+        assert_eq!(
+            pause_deadline(1_000, i64::MAX),
+            1_000 + MAX_PAUSE_SECONDS,
+            "a malformed length is bounded"
+        );
+    }
+
+    #[test]
+    fn an_alias_is_used_only_when_it_has_text() {
+        assert_eq!(display_name(None, "Recorded"), "Recorded");
+        assert_eq!(display_name(Some(""), "Recorded"), "Recorded");
+        assert_eq!(display_name(Some("   "), "Recorded"), "Recorded");
+        assert_eq!(display_name(Some("Writing"), "Recorded"), "Writing");
+    }
+
+    #[test]
+    fn icon_backfill_updates_only_apps_with_a_resolved_icon() {
+        let dir = TempDir::new("backfill");
+        let store = Store::open_at(&dir.db()).unwrap();
+        store.upsert_app(&app("a"), 0).unwrap();
+        store.upsert_app(&app("b"), 0).unwrap();
+
+        let updated = backfill_icons_with(&store, |info| {
+            (info.key == "a").then(|| "icon-a".to_string())
+        });
+        assert_eq!(updated, 1);
+        let missing = store.apps_missing_icons().unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].key, "b");
     }
 }

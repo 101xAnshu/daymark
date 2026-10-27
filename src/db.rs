@@ -1,14 +1,26 @@
 //! Local SQLite storage. One small schema, versioned with `user_version`, with
 //! WAL enabled so the interface can read while the tracker writes.
 
+use crate::date::Day;
 use crate::desktop::ResolvedApp;
-use crate::stats::SessionRow;
+use crate::stats::{DayData, RollupTotal, SessionRow};
 use rusqlite::{Connection, params, params_from_iter};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 6;
+
+/// The only values stored in `sessions.presence`. Anything unrecognised falls
+/// back to input so an older or malformed caller cannot break the journal.
+fn presence_code(value: &str) -> &'static str {
+    match value {
+        "inhibitor" => "inhibitor",
+        "audio" => "audio",
+        "mixed" => "mixed",
+        _ => "input",
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AppInfo {
@@ -17,6 +29,10 @@ pub struct AppInfo {
     pub name: String,
     pub icon: Option<String>,
     pub desktop_id: Option<String>,
+    /// A user-chosen display name. The recorded identity stays in `key`.
+    pub alias: Option<String>,
+    /// Hidden from lists and totals, but still recorded.
+    pub ignored: bool,
 }
 
 pub struct Store {
@@ -189,6 +205,64 @@ impl Store {
             .map_err(|e| format!("could not create the database schema: {e}"))?;
         }
 
+        if version < 3 {
+            conn.execute_batch(
+                "BEGIN;\n\
+                 CREATE TABLE IF NOT EXISTS daily_app_totals (\n\
+                   day_start INTEGER NOT NULL,\n\
+                   app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,\n\
+                   seconds INTEGER NOT NULL,\n\
+                   PRIMARY KEY (day_start, app_id)\n\
+                 );\n\
+                 PRAGMA user_version = 3;\n\
+                 COMMIT;",
+            )
+            .map_err(|e| format!("could not create the daily totals schema: {e}"))?;
+        }
+
+        if version < 4 {
+            // Existing rows were recorded from focus or input, so 'input' is
+            // the honest default. The column is additive: rollups, indexes
+            // and app identity keep working unchanged.
+            conn.execute_batch(
+                "BEGIN;\n\
+                 ALTER TABLE sessions ADD COLUMN presence TEXT NOT NULL DEFAULT 'input';\n\
+                 PRAGMA user_version = 4;\n\
+                 COMMIT;",
+            )
+            .map_err(|e| format!("could not add the presence column: {e}"))?;
+        }
+
+        if version < 5 {
+            // User-facing app preferences. Aliases are display-only; ignored
+            // apps stay in the database but are hidden from lists and totals.
+            conn.execute_batch(
+                "BEGIN;\n\
+                 ALTER TABLE apps ADD COLUMN alias TEXT;\n\
+                 ALTER TABLE apps ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0;\n\
+                 PRAGMA user_version = 5;\n\
+                 COMMIT;",
+            )
+            .map_err(|e| format!("could not add the app preference columns: {e}"))?;
+        }
+
+        if version < 6 {
+            // Opt-in, domain-only site totals. The table is empty unless the
+            // user enables site names; it never stores URLs or titles.
+            conn.execute_batch(
+                "BEGIN;\n\
+                 CREATE TABLE IF NOT EXISTS domain_totals (\n\
+                   day_start INTEGER NOT NULL,\n\
+                   domain TEXT NOT NULL,\n\
+                   seconds INTEGER NOT NULL,\n\
+                   PRIMARY KEY (day_start, domain)\n\
+                 );\n\
+                 PRAGMA user_version = 6;\n\
+                 COMMIT;",
+            )
+            .map_err(|e| format!("could not create the domain totals schema: {e}"))?;
+        }
+
         // A crash can leave one open interval. Its end timestamp is the last
         // heartbeat, so the sleeping gap is never credited to the application.
         conn.execute("UPDATE sessions SET is_open = 0 WHERE is_open = 1", [])
@@ -249,14 +323,60 @@ impl Store {
     }
 
     pub fn open_session(&self, app_id: i64, start: i64) -> Result<i64, String> {
+        self.open_session_with_presence(app_id, start, "input")
+    }
+
+    pub fn open_session_with_presence(
+        &self,
+        app_id: i64,
+        start: i64,
+        presence: &str,
+    ) -> Result<i64, String> {
         self.conn
             .execute(
-                "INSERT INTO sessions(app_id, started_at, ended_at, is_open)\n\
-                 VALUES(?1, ?2, ?2, 1)",
-                params![app_id, start],
+                "INSERT INTO sessions(app_id, started_at, ended_at, is_open, presence)\n\
+                 VALUES(?1, ?2, ?2, 1, ?3)",
+                params![app_id, start, presence_code(presence)],
             )
             .map_err(|e| format!("could not start a session: {e}"))?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Upgrade the recorded presence of a session. The tracker uses a
+    /// monotonic merge before calling this, so the value never goes back to
+    /// input for the same row.
+    pub fn set_session_presence(&self, id: i64, presence: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE sessions SET presence = ?1 WHERE id = ?2",
+                params![presence_code(presence), id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn session_presence(&self, id: i64) -> Option<String> {
+        self.conn
+            .query_row("SELECT presence FROM sessions WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .ok()
+    }
+
+    /// Seconds on a day that belong to sessions with audio, inhibitor or mixed
+    /// presence. Raw intervals only; the current live interval is added by the
+    /// interface. A session crossing midnight is clipped to the requested day.
+    pub fn presence_seconds_between(&self, start: i64, end: i64) -> Result<i64, String> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(MIN(ended_at, ?2) - MAX(started_at, ?1)), 0)\n\
+                 FROM sessions\n\
+                 WHERE is_open = 0 AND presence != 'input'\n\
+                   AND ended_at > ?1 AND started_at < ?2",
+                params![start, end],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
     }
 
     pub fn heartbeat_session(&self, id: i64, end: i64) -> Result<(), String> {
@@ -373,7 +493,7 @@ impl Store {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT id, key, name, icon_ref, desktop_id FROM apps WHERE id IN ({placeholders})"
+            "SELECT id, key, name, icon_ref, desktop_id, alias, ignored FROM apps WHERE id IN ({placeholders})"
         );
         let Ok(mut stmt) = self.conn.prepare(&sql) else {
             return HashMap::new();
@@ -385,6 +505,8 @@ impl Store {
                 name: r.get(2)?,
                 icon: r.get(3)?,
                 desktop_id: r.get(4)?,
+                alias: r.get(5)?,
+                ignored: r.get::<_, i64>(6)? != 0,
             })
         });
         let mut out = HashMap::new();
@@ -396,11 +518,81 @@ impl Store {
         out
     }
 
+    /// Set or clear a user-facing display name. The recorded app identity and
+    /// icon are untouched.
+    pub fn set_app_alias(&self, app_id: i64, alias: Option<&str>) -> Result<(), String> {
+        let alias = alias.map(str::trim).filter(|value| !value.is_empty());
+        self.conn
+            .execute(
+                "UPDATE apps SET alias = ?1 WHERE id = ?2",
+                params![alias, app_id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Hide an app from lists and totals without deleting its history.
+    pub fn set_app_ignored(&self, app_id: i64, ignored: bool) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE apps SET ignored = ?1 WHERE id = ?2",
+                params![if ignored { 1 } else { 0 }, app_id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Apps whose icon reference is missing, for the one-pass startup backfill.
+    pub fn apps_missing_icons(&self) -> Result<Vec<AppInfo>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, key, name, icon_ref, desktop_id, alias, ignored FROM apps\n\
+                 WHERE icon_ref IS NULL OR icon_ref = ''\n\
+                 ORDER BY id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(AppInfo {
+                    id: r.get(0)?,
+                    key: r.get(1)?,
+                    name: r.get(2)?,
+                    icon: r.get(3)?,
+                    desktop_id: r.get(4)?,
+                    alias: r.get(5)?,
+                    ignored: r.get::<_, i64>(6)? != 0,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        Ok(rows)
+    }
+
+    /// Store an icon reference resolved by the desktop index.
+    pub fn set_app_icon(&self, app_id: i64, icon: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE apps SET icon_ref = ?1 WHERE id = ?2",
+                params![icon, app_id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     pub fn has_any_sessions(&self) -> bool {
         self.conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM sessions LIMIT 1)", [], |r| {
-                r.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT EXISTS(\n\
+                   SELECT 1 FROM sessions\n\
+                   UNION ALL\n\
+                   SELECT 1 FROM daily_app_totals\n\
+                   LIMIT 1\n\
+                 )",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
             .map(|v| v != 0)
             .unwrap_or(false)
     }
@@ -411,21 +603,181 @@ impl Store {
             .unwrap_or(0)
     }
 
-    pub fn prune_before(&self, cutoff: i64) -> Result<usize, String> {
-        let deleted = self
+    /// Totals kept after raw sessions expire. Rows are `(day_start, app_id, seconds)`.
+    pub fn daily_app_totals_between(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<(i64, i64, i64)>, String> {
+        let mut stmt = self
             .conn
-            .execute("DELETE FROM sessions WHERE ended_at < ?1", [cutoff])
+            .prepare(
+                "SELECT day_start, app_id, seconds FROM daily_app_totals\n\
+                 WHERE day_start >= ?1 AND day_start < ?2\n\
+                 ORDER BY day_start, seconds DESC, app_id",
+            )
             .map_err(|e| e.to_string())?;
-        let _ = self.conn.execute(
-            "DELETE FROM apps WHERE id NOT IN (SELECT app_id FROM sessions)",
+        let rows = stmt
+            .query_map(params![start, end], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        Ok(rows)
+    }
+
+    /// Replace the domain totals for one day. Called only when the user has
+    /// opted in; the table never contains URLs or titles.
+    pub fn replace_domain_totals(
+        &self,
+        day_start: i64,
+        totals: &[(String, i64)],
+    ) -> Result<(), String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM domain_totals WHERE day_start = ?1",
+            [day_start],
+        )
+        .map_err(|e| e.to_string())?;
+        for (domain, seconds) in totals {
+            if domain.is_empty() || *seconds <= 0 {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO domain_totals(day_start, domain, seconds) VALUES(?1, ?2, ?3)",
+                params![day_start, domain, seconds],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Top domains for one day, largest first.
+    pub fn domain_totals_for_day(&self, day_start: i64) -> Result<Vec<(String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT domain, seconds FROM domain_totals\n\
+                 WHERE day_start = ?1\n\
+                 ORDER BY seconds DESC, domain",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([day_start], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        Ok(rows)
+    }
+
+    /// Remove every stored domain. Called when the user turns site names off.
+    pub fn clear_domain_totals(&self) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM domain_totals", [])
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Raw intervals plus preserved daily totals for a date range. The caller
+    /// decides per day which source wins: `day_totals` prefers raw intervals,
+    /// so a day still present in both places is never counted twice.
+    pub fn day_data_between(&self, start: i64, end: i64) -> Result<DayData, String> {
+        let rows = self.sessions_between(start, end)?;
+        let rollups = self
+            .daily_app_totals_between(start, end)?
+            .into_iter()
+            .map(|(day_start, app_id, seconds)| RollupTotal {
+                day_start,
+                app_id,
+                seconds,
+            })
+            .collect();
+        Ok(DayData { rows, rollups })
+    }
+
+    /// Delete raw sessions older than `cutoff`, first folding them into daily
+    /// per-app totals. The rollup is what keeps last year answerable after the
+    /// raw intervals are gone.
+    pub fn prune_before(&self, cutoff: i64) -> Result<usize, String> {
+        let old = {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT app_id, started_at, ended_at FROM sessions\n\
+                     WHERE is_open = 0 AND ended_at < ?1\n\
+                     ORDER BY started_at",
+                )
+                .map_err(|e| e.to_string())?;
+            stmt.query_map([cutoff], |r| {
+                Ok(SessionRow {
+                    app_id: r.get(0)?,
+                    started: r.get(1)?,
+                    ended: r.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>()
+        };
+
+        let mut totals: HashMap<(i64, i64), i64> = HashMap::new();
+        for row in &old {
+            let mut t = row.started;
+            while t < row.ended {
+                let day = Day::from_timestamp(t);
+                let day_end = day.end_ts();
+                let chunk_end = row.ended.min(day_end);
+                if chunk_end <= t {
+                    break;
+                }
+                *totals.entry((day.start_ts(), row.app_id)).or_insert(0) += chunk_end - t;
+                t = chunk_end;
+            }
+        }
+
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        for ((day_start, app_id), seconds) in totals {
+            tx.execute(
+                "INSERT INTO daily_app_totals(day_start, app_id, seconds)\n\
+                 VALUES(?1, ?2, ?3)\n\
+                 ON CONFLICT(day_start, app_id) DO UPDATE SET seconds = seconds + excluded.seconds",
+                params![day_start, app_id, seconds],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let deleted = tx
+            .execute(
+                "DELETE FROM sessions WHERE is_open = 0 AND ended_at < ?1",
+                [cutoff],
+            )
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM apps WHERE id NOT IN (SELECT app_id FROM sessions)\n\
+             AND id NOT IN (SELECT app_id FROM daily_app_totals)",
             [],
-        );
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(deleted)
     }
 
     pub fn delete_all(&self) -> Result<(), String> {
         self.conn
-            .execute_batch("BEGIN;\nDELETE FROM sessions;\nDELETE FROM apps;\nCOMMIT;")
+            .execute_batch(
+                "BEGIN;\n\
+                 DELETE FROM domain_totals;\n\
+                 DELETE FROM daily_app_totals;\n\
+                 DELETE FROM sessions;\n\
+                 DELETE FROM apps;\n\
+                 COMMIT;",
+            )
             .map_err(|e| e.to_string())
     }
 
@@ -438,21 +790,27 @@ impl Store {
     }
 }
 
-/// One-time repair of rows written before identity resolution was fixed.
+/// Repair rows written before identity resolution was fixed.
 ///
 /// Older builds stored unresolved fallbacks such as `wmclass:gjs` or
 /// `wmclass:com.t3tools.t3code` alongside the real application. Re-resolve
 /// those rows now, move their sessions to the real desktop entry and delete
 /// shell-internal identities so the journal never shows a `gjs` app again.
+/// The check is row-based, so it is safe on new databases and does not touch
+/// the schema version.
 pub fn migrate_legacy_identities(store: &Store) {
-    let version: i64 = match store
+    let has_legacy: bool = store
         .conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-    {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    if version >= 2 {
+        .query_row(
+            "SELECT EXISTS(\n\
+               SELECT 1 FROM apps WHERE key LIKE 'wmclass:%' OR key LIKE 'app:%'\n\
+             )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v != 0)
+        .unwrap_or(false);
+    if !has_legacy {
         return;
     }
     let index = crate::desktop::DesktopIndex::load();
@@ -498,7 +856,6 @@ pub fn migrate_legacy_identities(store: &Store) {
         }
     }
     let _ = store.conn.execute_batch("COMMIT");
-    let _ = store.conn.execute_batch("PRAGMA user_version = 2");
 }
 
 #[cfg(test)]
@@ -546,11 +903,257 @@ mod tests {
     fn schema_initializes_and_settings_roundtrip() {
         let dir = TempDir::new("init");
         let store = Store::open_at(&dir.db()).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 6);
         assert_eq!(store.get_setting("nope"), None);
         store.set_setting("theme", "dark").unwrap();
         drop(store);
         let store = Store::open_at(&dir.db()).unwrap();
         assert_eq!(store.get_setting("theme").as_deref(), Some("dark"));
+    }
+
+    #[test]
+    fn app_aliases_and_ignores_round_trip() {
+        let dir = TempDir::new("aliases");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let id = store.upsert_app(&app("org.example.Editor"), 0).unwrap();
+        let info = store.app_infos(&[id]).remove(&id).unwrap();
+        assert_eq!(info.alias, None);
+        assert!(!info.ignored);
+
+        store.set_app_alias(id, Some("Writing")).unwrap();
+        store.set_app_ignored(id, true).unwrap();
+        let info = store.app_infos(&[id]).remove(&id).unwrap();
+        assert_eq!(info.alias.as_deref(), Some("Writing"));
+        assert!(info.ignored);
+
+        store.set_app_alias(id, Some("   ")).unwrap();
+        store.set_app_ignored(id, false).unwrap();
+        let info = store.app_infos(&[id]).remove(&id).unwrap();
+        assert_eq!(info.alias, None);
+        assert!(!info.ignored);
+    }
+
+    #[test]
+    fn icon_backfill_lists_only_missing_icons() {
+        let dir = TempDir::new("icons");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let first = store.upsert_app(&app("org.example.First"), 0).unwrap();
+        let second = store.upsert_app(&app("org.example.Second"), 0).unwrap();
+        store.set_app_icon(first, "utilities-terminal").unwrap();
+
+        let missing = store.apps_missing_icons().unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].id, second);
+        assert_eq!(missing[0].icon, None);
+
+        store.set_app_icon(second, "web-browser").unwrap();
+        assert!(store.apps_missing_icons().unwrap().is_empty());
+    }
+
+    #[test]
+    fn domain_totals_replace_and_clear() {
+        let dir = TempDir::new("domains");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let day = Day::today();
+
+        store
+            .replace_domain_totals(
+                day.start_ts(),
+                &[("github.com".into(), 120), ("example.com".into(), 60)],
+            )
+            .unwrap();
+        assert_eq!(
+            store.domain_totals_for_day(day.start_ts()).unwrap(),
+            vec![("github.com".into(), 120), ("example.com".into(), 60)]
+        );
+
+        store
+            .replace_domain_totals(day.start_ts(), &[("github.com".into(), 90)])
+            .unwrap();
+        assert_eq!(
+            store.domain_totals_for_day(day.start_ts()).unwrap(),
+            vec![("github.com".into(), 90)]
+        );
+
+        store.clear_domain_totals().unwrap();
+        assert!(
+            store
+                .domain_totals_for_day(day.start_ts())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn presence_migration_keeps_sessions_rollups_and_identity() {
+        let dir = TempDir::new("presence-migrate");
+        let path = dir.db();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE apps (\n\
+               id INTEGER PRIMARY KEY,\n\
+               key TEXT NOT NULL UNIQUE,\n\
+               name TEXT NOT NULL,\n\
+               icon_ref TEXT,\n\
+               desktop_id TEXT,\n\
+               wm_class TEXT,\n\
+               first_seen INTEGER NOT NULL,\n\
+               last_seen INTEGER NOT NULL\n\
+             );\n\
+             CREATE TABLE sessions (\n\
+               id INTEGER PRIMARY KEY,\n\
+               app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,\n\
+               started_at INTEGER NOT NULL,\n\
+               ended_at INTEGER NOT NULL,\n\
+               is_open INTEGER NOT NULL DEFAULT 0,\n\
+               source TEXT NOT NULL DEFAULT 'focus',\n\
+               CHECK(ended_at >= started_at)\n\
+             );\n\
+             CREATE UNIQUE INDEX sessions_one_open_idx\n\
+               ON sessions(is_open) WHERE is_open = 1;\n\
+             CREATE TABLE settings (\n\
+               key TEXT PRIMARY KEY,\n\
+               value TEXT NOT NULL\n\
+             );\n\
+             CREATE TABLE daily_app_totals (\n\
+               day_start INTEGER NOT NULL,\n\
+               app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,\n\
+               seconds INTEGER NOT NULL,\n\
+               PRIMARY KEY (day_start, app_id)\n\
+             );\n\
+             INSERT INTO apps(id, key, name, first_seen, last_seen)\n\
+               VALUES(1, 'org.example.Legacy', 'Legacy', 100, 100);\n\
+             INSERT INTO sessions(id, app_id, started_at, ended_at, is_open, source)\n\
+               VALUES(1, 1, 100, 200, 0, 'focus');\n\
+             INSERT INTO daily_app_totals(day_start, app_id, seconds)\n\
+               VALUES(50, 1, 42);\n\
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open_at(&path).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 6);
+        // Existing rows become input-backed, and neither the session nor the
+        // rollup or app identity is rewritten.
+        assert_eq!(store.session_presence(1).as_deref(), Some("input"));
+        let rows = store.sessions_between(0, 1000).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].started, 100);
+        assert_eq!(rows[0].ended, 200);
+        assert_eq!(
+            store.daily_app_totals_between(0, 1000).unwrap(),
+            vec![(50, 1, 42)]
+        );
+        assert!(store.app_infos(&[1]).contains_key(&1));
+        let (alias, ignored): (Option<String>, i64) = store
+            .conn
+            .query_row("SELECT alias, ignored FROM apps WHERE id = 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(alias, None);
+        assert_eq!(ignored, 0);
+    }
+
+    #[test]
+    fn presence_persists_and_counts_only_non_input_sessions() {
+        let dir = TempDir::new("presence");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let app_id = store
+            .upsert_app(&app("org.example.Player"), today.start_ts())
+            .unwrap();
+        let input_app = store
+            .upsert_app(&app("org.example.Editor"), today.start_ts())
+            .unwrap();
+
+        let audio = store
+            .open_session_with_presence(app_id, today.start_ts() + 3600, "audio")
+            .unwrap();
+        store
+            .close_session(audio, today.start_ts() + 3600 + 12 * 60)
+            .unwrap();
+        let inhibitor = store
+            .open_session_with_presence(app_id, today.start_ts() + 7200, "inhibitor")
+            .unwrap();
+        store
+            .close_session(inhibitor, today.start_ts() + 7200 + 30 * 60)
+            .unwrap();
+        let input = store
+            .open_session(input_app, today.start_ts() + 10800)
+            .unwrap();
+        store
+            .close_session(input, today.start_ts() + 10800 + 3600)
+            .unwrap();
+
+        assert_eq!(store.session_presence(audio).as_deref(), Some("audio"));
+        assert_eq!(
+            store.session_presence(inhibitor).as_deref(),
+            Some("inhibitor")
+        );
+        assert_eq!(store.session_presence(input).as_deref(), Some("input"));
+        assert_eq!(
+            store
+                .presence_seconds_between(today.start_ts(), today.end_ts())
+                .unwrap(),
+            42 * 60
+        );
+
+        // Presence only upgrades, and an open row is not counted twice by the
+        // day query (the interface adds the live interval itself).
+        store.set_session_presence(audio, "mixed").unwrap();
+        assert_eq!(store.session_presence(audio).as_deref(), Some("mixed"));
+        store
+            .open_session_with_presence(app_id, today.start_ts() + 20_000, "audio")
+            .unwrap();
+        assert_eq!(
+            store
+                .presence_seconds_between(today.start_ts(), today.end_ts())
+                .unwrap(),
+            42 * 60
+        );
+        assert_eq!(
+            store
+                .presence_seconds_between(today.add_days(1).start_ts(), today.add_days(1).end_ts())
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn presence_seconds_are_clipped_to_the_day() {
+        let dir = TempDir::new("presence-midnight");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let yesterday = today.add_days(-1);
+        let app_id = store.upsert_app(&app("a"), yesterday.start_ts()).unwrap();
+        let session = store
+            .open_session_with_presence(app_id, yesterday.start_ts() + 23 * 3600 + 1800, "audio")
+            .unwrap();
+        store
+            .close_session(session, today.start_ts() + 1800)
+            .unwrap();
+        assert_eq!(
+            store
+                .presence_seconds_between(yesterday.start_ts(), yesterday.end_ts())
+                .unwrap(),
+            1800
+        );
+        assert_eq!(
+            store
+                .presence_seconds_between(today.start_ts(), today.end_ts())
+                .unwrap(),
+            1800
+        );
     }
 
     #[test]
@@ -641,6 +1244,138 @@ mod tests {
     }
 
     #[test]
+    fn pruning_keeps_daily_totals_and_app_identity() {
+        let dir = TempDir::new("rollup");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let old_day = today.add_days(-100);
+        let id = store.upsert_app(&app("a"), 0).unwrap();
+        let start = old_day.start_ts() + 9 * 3600;
+        let session = store.open_session(id, start).unwrap();
+        store.close_session(session, start + 1800).unwrap();
+
+        let removed = store.prune_before(today.add_days(-30).start_ts()).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(store.session_count(), 0);
+        assert_eq!(
+            store
+                .daily_app_totals_between(old_day.start_ts(), old_day.add_days(1).start_ts())
+                .unwrap(),
+            vec![(old_day.start_ts(), id, 1800)]
+        );
+        assert!(store.app_infos(&[id]).contains_key(&id));
+        assert!(store.has_any_sessions());
+    }
+
+    #[test]
+    fn day_data_returns_raw_intervals_and_preserved_rollups() {
+        let dir = TempDir::new("day-data");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let old_day = today.add_days(-100);
+        let id = store.upsert_app(&app("a"), 0).unwrap();
+        let old = store.open_session(id, old_day.start_ts() + 3600).unwrap();
+        store
+            .close_session(old, old_day.start_ts() + 3600 + 1800)
+            .unwrap();
+        let recent = store.open_session(id, today.start_ts() + 3600).unwrap();
+        store
+            .close_session(recent, today.start_ts() + 3600 + 600)
+            .unwrap();
+
+        store.prune_before(today.add_days(-30).start_ts()).unwrap();
+        let data = store
+            .day_data_between(old_day.start_ts(), today.end_ts())
+            .unwrap();
+        assert_eq!(data.rows.len(), 1);
+        assert_eq!(data.rows[0].started, today.start_ts() + 3600);
+        assert_eq!(
+            data.rollups,
+            vec![RollupTotal {
+                day_start: old_day.start_ts(),
+                app_id: id,
+                seconds: 1800,
+            }]
+        );
+    }
+
+    #[test]
+    fn pruning_twice_does_not_double_count() {
+        let dir = TempDir::new("rollup-twice");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let old_day = today.add_days(-100);
+        let id = store.upsert_app(&app("a"), 0).unwrap();
+        let session = store.open_session(id, old_day.start_ts() + 3600).unwrap();
+        store
+            .close_session(session, old_day.start_ts() + 3600 + 900)
+            .unwrap();
+
+        let cutoff = today.add_days(-30).start_ts();
+        store.prune_before(cutoff).unwrap();
+        store.prune_before(cutoff).unwrap();
+        assert_eq!(
+            store
+                .daily_app_totals_between(old_day.start_ts(), old_day.add_days(1).start_ts())
+                .unwrap(),
+            vec![(old_day.start_ts(), id, 900)]
+        );
+    }
+
+    #[test]
+    fn a_session_crossing_midnight_rolls_into_both_days() {
+        let dir = TempDir::new("rollup-midnight");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let day = today.add_days(-100);
+        let next = day.add_days(1);
+        let id = store.upsert_app(&app("a"), 0).unwrap();
+        let start = day.start_ts() + 23 * 3600 + 1800;
+        let end = next.start_ts() + 1800;
+        let session = store.open_session(id, start).unwrap();
+        store.close_session(session, end).unwrap();
+
+        store.prune_before(today.add_days(-30).start_ts()).unwrap();
+        assert_eq!(
+            store
+                .daily_app_totals_between(day.start_ts(), next.add_days(1).start_ts())
+                .unwrap(),
+            vec![(day.start_ts(), id, 1800), (next.start_ts(), id, 1800)]
+        );
+    }
+
+    #[test]
+    fn delete_all_clears_rolled_up_totals() {
+        let dir = TempDir::new("rollup-delete");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let today = Day::today();
+        let old_day = today.add_days(-100);
+        let id = store.upsert_app(&app("a"), 0).unwrap();
+        let session = store.open_session(id, old_day.start_ts() + 3600).unwrap();
+        store
+            .close_session(session, old_day.start_ts() + 4200)
+            .unwrap();
+        store.prune_before(today.add_days(-30).start_ts()).unwrap();
+        store
+            .replace_domain_totals(old_day.start_ts(), &[("example.com".into(), 60)])
+            .unwrap();
+        store.delete_all().unwrap();
+        assert!(!store.has_any_sessions());
+        assert!(
+            store
+                .daily_app_totals_between(0, i64::MAX)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .domain_totals_for_day(old_day.start_ts())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn a_short_session_merges_into_a_closed_one() {
         let dir = TempDir::new("merge");
         let store = Store::open_at(&dir.db()).unwrap();
@@ -696,7 +1431,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 6);
     }
 
     #[test]

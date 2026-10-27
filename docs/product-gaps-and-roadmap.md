@@ -25,11 +25,66 @@ The product should be reliable, private, native, and easy to install and keep ru
 - The repository is public. The release uses GitHub Actions, Releases, and package links on
   the free plan.
 
+## V2 progress
+
+- The Rhythm view is implemented on `v2`: a 7×24 heatmap for the last seven days,
+  with hour labels, per-day totals, and a legend. The library has **145 tests**, plus
+  **8 tray tests** in the binary crate.
+- The Day view now has a metrics row and a 24-hour timeline on `v2`. The metrics row
+  reports the longest uninterrupted stretch, distinct apps, time after midnight
+  (00:00–05:00), the change from the same weekday last week, and a live Now cell for
+  today. The timeline draws app-tinted sessions clipped to the selected day.
+- The optional systemd user unit is implemented on `v2`: packages install it, but do not
+  enable it. The decision log is in `docs/v2-decisions.md`.
+- The inotify watch is implemented on `v2`: focus changes wake the tracker immediately,
+  with a 30-second safety check and a 2-second fallback when no watch can be created.
+- Retention rollup is implemented in the store and both views: old sessions fold into
+  daily per-app totals before pruning, the Day view keeps the rolled-up total and per-app
+  list with a quiet **Totals only** state for the timeline and by-hour chart, and the
+  fourteen-day History list includes those days. Rollup-only days show only the metrics a
+  daily total can support: distinct apps and the week delta.
+- arm64/aarch64 packages are implemented on `v2`: both package scripts take an architecture
+  option, a CI job cross-builds the arm64 `.deb` and aarch64 `.rpm` with cargo-zigbuild, and
+  the same job install-tests both under QEMU. The free plan has no native arm64 runners, so
+  the packages are not built on arm64 hardware and a live arm64 run is still a separate check.
+- Audio and inhibitor presence is capped on `v2`. The companion reports `idle_ms`, whether
+  an idle inhibitor is active, and whether a session-bus MPRIS player is `Playing`. A
+  session whose only presence is audio or an inhibitor closes at the last input plus two
+  hours; the cap latches until input returns. Schema v4 adds `sessions.presence`
+  (`input`, `inhibitor`, `audio` or `mixed`) without changing rollups or app identity, and
+  the Day view shows a quiet presence note under the timeline.
+- The weekly digest is implemented on `v2`: computation, local notification payload,
+  preference persistence, once-a-day delivery through the tracker, the companion
+  notification consumer, and the Settings toggle.
+- The APT-aware update reader is implemented on `v2`: local dpkg status and
+  `apt-cache policy` parsing with numeric version comparison, no network, and a quiet
+  Settings notice when a newer candidate exists. There is no APT repository to report
+  against yet.
+- App aliases, ignore flags, share percentages and the startup icon backfill are
+  implemented on `v2`. The Day list uses the alias when present, hides ignored apps
+  from rows and shares while keeping the whole day total, and a `...` editor sets the
+  display name or ignore rule. **Show ignored** reveals hidden rows so they can be
+  edited again. The recorded app identity is never renamed.
+- Opt-in site names are implemented on `v2`: Firefox and Chromium-family history is
+  read read-only, only domains and approximate daily seconds are stored, the Day view
+  shows the top domains for the selected day, and turning the setting off deletes the
+  stored domains. No URLs, paths, queries, page titles or private-window visits are
+  stored.
+- The tray is implemented on `v2`: a small StatusNotifierItem menu offers Open
+  Daymark, Pause 15 minutes, Pause 1 hour, Pause until resumed, Resume while
+  paused, and Quit Daymark. It drives the existing local socket command path,
+  keeps the UI thread free of D-Bus work, shows the paused state with a
+  generated icon, and stays absent when no AppIndicator host exists. Ubuntu
+  ships the host; Fedora may need `gnome-shell-extension-appindicator`, which
+  the packages recommend but do not require. The tray starts only when the UI
+  does, so `--background` remains a headless process.
+- V2 is local only. Nothing on `v2` is pushed until the branch is approved.
+
 ## 1. Executive summary
 
 Daymark already does the core job well. It works on stock GNOME 45 to 50, on Wayland and
 Xorg. It stores no window titles, browser history, or URLs, and it contains no network
-code. It ships as one 8.5 MiB native binary with no WebView and no WebKitGTK or GTK
+code. It ships as one 10.3 MiB native binary with no WebView and no WebKitGTK or GTK
 runtime. The headless process uses about 8 MB, and the background mode creates no window
 or event loop until the interface is requested.
 
@@ -70,7 +125,7 @@ The scorecard records the state before V1. The implemented result is in Current 
 | Install path | `git clone` and `install.sh` | A .deb for Ubuntu and an .rpm for Fedora from GitHub Releases, no build step | P0 |
 | Package quality | None yet | Small .deb and .rpm with a working first run | P0 |
 | Privacy model | No titles, URLs, history, or network | Keep, and keep site data opt-in and domain-only | Keep |
-| Footprint | 8.5 MiB binary, about 8 MB headless, about 24 MB open | Measure both hidden states and keep the native build | Keep |
+| Footprint | 10.3 MiB binary, about 8 MB headless, about 24 MB open | Measure both hidden states and keep the native build | Keep |
 | Capture accuracy | 2 second polling, no noise floor | Event-driven with a 30 second fallback and a 5 second merge | P1 |
 | Idle, lock, suspend | Exact input-stop timestamp and GNOME signals | Keep, and add a presence flag and a cap | Keep and P1 |
 | Pause | Saved boolean with no timed pause | 15 minutes, 1 hour, or until resumed, with a safe resume | P0 |
@@ -153,6 +208,12 @@ workflow creates a draft release and runs `shellcheck`, `cargo fmt --check`,
 `cargo clippy -D warnings`, and `cargo test`. CI passes; the release workflow still needs a
 release tag.
 
+V2 adds arm64 and aarch64 coverage without an arm64 runner. The package scripts accept
+`--arch`, and CI cross-builds the arm64 packages with cargo-zigbuild, checks their
+architecture, and installs them under QEMU. The free plan has no native arm64 runners, so
+the cross build is the only build path; real-hardware installation and runtime behavior
+remain unverified until an arm64 machine or a paid runner is available.
+
 ### App identity and icons
 
 Today, the Shell app id is strong on GNOME, but a window-backed Electron or web app can
@@ -163,30 +224,48 @@ ignore fields, and a share percentage in the app list.
 
 ### Data depth
 
-Today, Daymark has a calm day view, 7 day bars, a by-hour chart, an app list, and 14 day
-history.
+Today, Daymark has a calm day view with a metrics row, a 24-hour session timeline,
+7 day bars, a by-hour chart, an app list, a 14 day history, and a 7×24 rhythm view.
+A quiet note under the timeline reports time with audio or an inhibitor when present,
+without adding another metric cell at the 900 px minimum width. Days whose raw
+intervals have aged out keep their total and per-app split and show a **Totals only**
+state in place of the timeline and by-hour chart; only the metrics a daily total can
+support remain.
 
-The target is a metrics row and a day timeline first, then a heatmap. Keep the calm visual
-language. Do not turn the timeline into hundreds of tiny segments.
+The heatmap shipped first; the metrics row and day timeline follow it. Keep the calm
+visual language. Do not turn the timeline into hundreds of tiny segments.
 
 ### Retention and time
 
-Today, retention deletes rows, and day queries use today's local timezone.
+Today, retention folds old sessions into daily per-app totals before deleting them,
+and both the Day and History views read the rollup alongside raw intervals. A day
+still shows hourly detail while its intervals exist and a totals-only state after
+they expire. Day queries use today's local timezone.
 
-The target is a daily rollup per app and per domain if domains are added, with a "totals
-only before this date" state. Add `tz_offset_min` to sessions and use it in day queries.
+The remaining target is a per-row timezone offset so travel does not move past
+sessions into another day. A domain rollup would follow only if domains are added.
 
 ### Tests and measurement
 
-The tree now has 69 tests covering date handling, storage, recovery, migration, pruning,
-settings, single instance, tracker behavior, the noise floor and merge, timed pause, log
-rotation, extension selection, the first-run decision, autostart consent, and read-only
-doctor/status output. Some tracker tests still use real sleeps and wall time.
+The tree now has 145 library tests and 8 tray tests covering date handling, storage,
+recovery, migration, pruning, daily rollup preservation and raw/rollup merging (raw
+intervals win, totals-only days, old empty days), settings, single instance, tracker
+behavior, the inotify watch
+and fallback, the noise floor and merge, timed pause, log rotation, extension selection,
+the first-run decision, autostart consent, seven-day hourly heatmap aggregation, day
+metrics and timeline segmentation across midnight and idle gaps, idle_ms parsing, the
+two-hour presence boundary, input return, lock and idle precedence, presence persistence
+and the v3 to v4 migration, weekly digest delivery and once-a-day gating, local APT
+policy/status parsing, app alias/ignore storage, share labels and visible-row filtering,
+icon-backfill selection, domain extraction, browser history reading and domain storage,
+read-only doctor/status output, pause command encoding, and tray
+menu, icon and pause-state mapping. Some tracker tests still
+use real sleeps and wall time.
 
 The remaining target is a `tick` function that takes `now_wall`, `now_mono`, and state, with
-tests that replay event sequences. Cover switch, blip, merge, idle backdate, audio cap,
-suspend, clock jump, pause, midnight, stale, and recovery. `scripts/measure.sh` now exists
-and the README publishes headless and hidden-after-close numbers.
+tests that replay event sequences. Cover switch, blip, merge, idle backdate, suspend,
+clock jump, pause, midnight, stale, and recovery. `scripts/measure.sh` now exists and the
+README publishes headless and hidden-after-close numbers.
 
 ## 5. What to keep
 
@@ -195,7 +274,7 @@ and the README publishes headless and hidden-after-close numbers.
   and Fedora 42 (GNOME 48).
 - The privacy model. No window titles, no browser files, no URLs, and no network code.
 - The native UI. Slint with no WebView, no WebKitGTK or GTK runtime, and AccessKit roles.
-- The single binary. 8.5 MiB, no Node, no Chromium tree, and a simple package.
+- The single binary. 10.3 MiB, no Node, no Chromium tree, and a simple package.
 - Crash and corruption behavior. The 30 second heartbeat, the one-open-row rule, the
   corrupt database quarantine, and monotonic duration accounting.
 - GNOME identity handling. Shell app id, Shell surface filtering, legacy row merge, icon
@@ -244,29 +323,39 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 
 ### P1: V1.1 reliability
 
-7. Add an inotify state watch with a 30 second fallback.
+7. Add an inotify state watch with a 30 second fallback. **Implemented on `v2`.**
 8. Cap audio and inhibitor-only presence at 2 hours from the last input. Add a presence
    flag that records whether time came from input or audio playback, and show it in the UI.
-9. Add the day timeline and metrics row.
-10. Add aliases, ignore, share percentage, and icon backfill.
-11. Add retention rollup and per-row timezone offset.
+   **Implemented on `v2`: schema v4 stores input, inhibitor, audio or mixed, the cap
+   latches until input returns, and the Day view shows a quiet note.**
+9. Add the day timeline and metrics row. **Implemented on `v2`.**
+10. Add aliases, ignore, share percentage, and icon backfill. **Implemented on `v2`.**
+11. Add retention rollup and per-row timezone offset. **Retention rollup is implemented
+    on `v2` across the store, the Day view and History; the timezone offset remains.**
 12. Add release notes, a changelog, and the bench script.
 
 ### P2: V2 insights
 
 13. Add a tray with open, pause 15 minutes, pause 1 hour, pause until resumed, and quit.
     The tray icon should show the paused state, and it should reappear when the bar restarts.
-14. Add the 7 by 24 heatmap.
-15. Add the weekly digest notification.
-16. Add the APT-aware update notice.
+    **Implemented on `v2` with a StatusNotifierItem menu over the local socket. The icon
+    shows the paused state; a watcher that returns after a panel restart is picked up
+    again; a missing host or session bus leaves the app usable.**
+14. Add the 7 by 24 heatmap. **Implemented on `v2` as the Rhythm view.**
+15. Add the weekly digest notification. **Implemented on `v2`.**
+16. Add the APT-aware update notice. **Local reader and Settings notice implemented on
+    `v2`; an APT repository remains.**
 17. Write the design token and decision notes, and review animation and transitions.
-18. Add an optional systemd user unit with `Restart=on-failure`.
-19. Build arm64 .deb and .rpm packages.
+18. Add an optional systemd user unit with `Restart=on-failure`. **Implemented on `v2`.**
+19. Build arm64 .deb and .rpm packages. **Implemented on `v2` as cross-built packages from
+    amd64 CI, with QEMU install smoke tests. The free plan has no native arm64 runners, so a
+    real-arm64 check is still pending.**
 
 ### P3 and V3
 
 20. Add opt-in, privacy-preserving domain naming with title hashes and read-only history,
-    or a browser companion that reports the active domain.
+    or a browser companion that reports the active domain. **Implemented on `v2` as an
+    opt-in, domain-only reader of local browser history; no titles or URLs are stored.**
 21. Add a weekly `VACUUM INTO` backup and keep two copies.
 22. Add a signed APT repository.
 23. Split the collector and GUI only if domains or the tray make the collector too large.
@@ -318,28 +407,44 @@ These choices are fixed for V1.
    the glibc 2.35 floor. The .rpm targets Fedora 42 and newer on x86_64 (GNOME 48+).
 4. V1 ships through GitHub Releases only. The APT repository comes later.
 5. V1 stays title-free. Site names are not in V1.
-6. The tray ships in V2.
+6. The tray ships in V2. It uses the StatusNotifierItem/AppIndicator host, recommends
+   `gnome-shell-extension-appindicator` on Ubuntu and Fedora without requiring it, and
+   fails quietly when no host is present.
 7. Pause offers 15 minutes, 1 hour, and until resumed. A timed pause ends by itself; an
    open-ended pause resumes at the next app start, which is the next login when autostart
    is on.
 8. Implementation runs on `v1-release`. `main` stays untouched.
+9. arm64 `.deb` and aarch64 `.rpm` packages are cross-built from amd64 runners. The free
+   plan has no native arm64 runners, so CI uses QEMU for install smoke tests and a
+   real-arm64 run stays a separate check.
 
 ## 11. Evidence notes
 
 - `src/tracker.rs` holds the 2 second park, the 30 second heartbeat, the 1 second discard,
   the 5 second delta clamp, the midnight split, and the gap detection.
-- `src/db.rs` holds the schema, recovery, migration, and prune logic.
+- `src/db.rs` holds the schema, recovery, migration, prune logic, and the combined
+  raw-interval plus daily-rollup query.
+- `src/stats.rs` picks one source per day: raw intervals while they exist, otherwise the
+  preserved daily total, and reports whether a day is totals only.
 - `src/settings.rs` stores pause, idle, retention, and theme settings.
 - `src/main.rs` starts the 700 ms UI timer, stops it while the window is hidden, and runs
   the `--background` loop.
 - `src/platform.rs` handles autostart and extension install, preferring the packaged
   system-wide copy.
-- `src/instance.rs` holds the show and quit socket.
-- `extension/extension.js` reports focus, idle, shield, and sleep state and queries idle
-  inhibitors.
-- `ui/app.slint` holds the day, week, hourly, history, search, settings, first-run, and
-  banner views.
-- The current tree has 69 tests, CI, .deb and .rpm packaging, `doctor`, timed pause, the
-  first-run flow, and the noise floor. It still has no tray.
-- This document is the plan and the review record. Implementation runs on `v1-release`;
-  `main` stays untouched.
+- `src/instance.rs` holds the show, quit, pause and resume socket commands.
+- `src/tray.rs` holds the optional StatusNotifierItem menu, generated icons and the
+  low-frequency pause-state poll. It sends commands through `src/instance.rs` and never
+  touches Slint.
+- `extension/extension.js` reports focus, idle, shield, sleep, idle milliseconds, idle
+  inhibitors, and session-bus MPRIS playback.
+- `ui/app.slint` holds the day metrics row, 24-hour timeline, presence note, week, hourly,
+  history, search, settings, first-run, and banner views.
+- The current tree has 145 library tests and 8 tray tests, CI, amd64 and arm64 `.deb`
+  packaging, x86_64 and aarch64 `.rpm` packaging, `doctor`, timed pause, the first-run
+  flow, the noise floor, the Rhythm
+  heatmap, the inotify watch, the day metrics and timeline, the audio/inhibitor presence
+  cap, the weekly digest computation and transport, the retention rollup in the Day and
+  History views, and the optional tray. The tray's live appearance still needs a GNOME or
+  other AppIndicator session.
+- This document is the plan and the review record. V1 is merged on `main`; V2 runs on
+  `v2`.

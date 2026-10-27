@@ -6,35 +6,98 @@
 # rpmlint is not required. Fedora's rpm-build package provides rpmbuild:
 #   Fedora: sudo dnf install rpm-build
 #   Ubuntu: sudo apt install rpm
+#
+# The host architecture is packaged by default. Pass --arch to package another
+# supported architecture; a cross build uses cargo-zigbuild.
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 
-BINARY="${ROOT}/target/release/daymark"
-BUILD_DIR="${ROOT}/build/rpm"
-SOURCE_DIR="${BUILD_DIR}/source"
-RPMBUILD_DIR="${BUILD_DIR}/rpmbuild"
 OUT_DIR="${ROOT}/dist"
 EXT_UUID="daymark@daymark.app"
 MAINTAINER="Daymark contributors <maintainers@daymark.app>"
+GLIBC_FLOOR="2.35"
+
+HOST_UNAME="$(uname -m)"
+case "${HOST_UNAME}" in
+    x86_64|amd64) HOST_ARCH="x86_64" ;;
+    aarch64|arm64) HOST_ARCH="aarch64" ;;
+    *) HOST_ARCH="" ;;
+esac
 
 usage() {
     cat <<'EOF'
-Usage: scripts/build-rpm.sh [--skip-build] [--help]
+Usage: scripts/build-rpm.sh [--arch x86_64|aarch64] [--skip-build] [--help]
 
-  --skip-build   use an existing target/release/daymark
+  --arch ARCH    package architecture (default: host architecture)
+  --skip-build   use an existing release binary for the selected architecture
+
+Cross builds use cargo-zigbuild and need Zig available to it. For example,
+on an x86_64 host:
+
+  scripts/build-rpm.sh --arch aarch64
 EOF
 }
 
 BUILD=1
-for arg in "$@"; do
-    case "${arg}" in
-        --skip-build) BUILD=0 ;;
-        -h|--help) usage; exit 0 ;;
-        *) echo "Unknown option: ${arg}" >&2; usage >&2; exit 2 ;;
+TARGET_ARCH=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --arch)
+            [ "$#" -ge 2 ] || {
+                echo "--arch needs a value: x86_64 or aarch64." >&2
+                exit 2
+            }
+            TARGET_ARCH="$2"
+            shift 2
+            ;;
+        --arch=*)
+            TARGET_ARCH="${1#*=}"
+            shift
+            ;;
+        --skip-build)
+            BUILD=0
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 2
+            ;;
     esac
 done
+
+ARCH="${TARGET_ARCH:-${HOST_ARCH}}"
+[ -n "${ARCH}" ] || {
+    echo "Could not detect the host architecture; pass --arch x86_64 or aarch64." >&2
+    exit 1
+}
+
+case "${ARCH}" in
+    x86_64) RUST_TARGET="x86_64-unknown-linux-gnu" ;;
+    aarch64) RUST_TARGET="aarch64-unknown-linux-gnu" ;;
+    *)
+        echo "Unsupported RPM architecture: ${ARCH}. Use x86_64 or aarch64." >&2
+        exit 2
+        ;;
+esac
+
+if [ -n "${HOST_ARCH}" ] && [ "${ARCH}" = "${HOST_ARCH}" ]; then
+    CROSS=0
+    BINARY="${ROOT}/target/release/daymark"
+else
+    CROSS=1
+    BINARY="${ROOT}/target/${RUST_TARGET}/release/daymark"
+fi
+
+BUILD_DIR="${ROOT}/build/rpm-${ARCH}"
+SOURCE_DIR="${BUILD_DIR}/source"
+RPMBUILD_DIR="${BUILD_DIR}/rpmbuild"
 
 command -v rpmbuild >/dev/null 2>&1 || {
     echo "rpmbuild was not found. Install rpm-build (Fedora) or rpm (Ubuntu)." >&2
@@ -51,7 +114,17 @@ fi
 export SOURCE_DATE_EPOCH
 
 if [ "${BUILD}" = 1 ]; then
-    cargo build --release --locked
+    if [ "${CROSS}" = 1 ]; then
+        if ! command -v cargo-zigbuild >/dev/null 2>&1; then
+            echo "Cross-building ${ARCH} needs cargo-zigbuild and Zig." >&2
+            echo "Install them, or build the target and pass --skip-build." >&2
+            exit 1
+        fi
+        cargo zigbuild --release --locked \
+            --target "${RUST_TARGET}.${GLIBC_FLOOR}"
+    else
+        cargo build --release --locked
+    fi
 fi
 
 [ -x "${BINARY}" ] || {
@@ -82,6 +155,7 @@ mkdir -p \
     "${STAGE}/usr/share/icons/hicolor/scalable/apps" \
     "${STAGE}/usr/share/gnome-shell/extensions/${EXT_UUID}" \
     "${STAGE}/usr/share/doc/daymark" \
+    "${STAGE}/usr/lib/systemd/user" \
     "${RPMBUILD_DIR}/SOURCES" \
     "${RPMBUILD_DIR}/SPECS" \
     "${RPMBUILD_DIR}/BUILD" \
@@ -89,6 +163,8 @@ mkdir -p \
     "${OUT_DIR}"
 
 install -m 0755 "${BINARY}" "${STAGE}/usr/bin/daymark"
+install -m 0644 packaging/daymark.service \
+    "${STAGE}/usr/lib/systemd/user/daymark.service"
 install -m 0644 packaging/daymark.desktop \
     "${STAGE}/usr/share/applications/daymark.desktop"
 install -m 0644 assets/daymark.svg \
@@ -120,11 +196,17 @@ tar \
     gzip -9n >"${SOURCE_ARCHIVE}"
 
 # Keep the committed spec valid for a manual rpmbuild, while making the script
-# authoritative for the version and changelog. Everything above %changelog is
-# reused; the version line is replaced from Cargo.toml.
+# authoritative for the version and architecture. Everything above %changelog
+# is reused. A foreign BuildArch is rejected by rpmbuild, so a cross build
+# drops that line and relies on --target instead.
 SPEC="${RPMBUILD_DIR}/SPECS/daymark.spec"
+if [ "${CROSS}" = 1 ]; then
+    ARCH_SED=(-e '/^BuildArch:/d')
+else
+    ARCH_SED=(-e "s/^BuildArch:.*/BuildArch:      ${ARCH}/")
+fi
 awk '/^%changelog/ { exit } { print }' packaging/rpm/daymark.spec |
-    sed "s/^Version:.*/Version:        ${VERSION}/" >"${SPEC}"
+    sed -e "s/^Version:.*/Version:        ${VERSION}/" "${ARCH_SED[@]}" >"${SPEC}"
 {
     echo "%changelog"
     printf '* %s %s - %s-1\n' \
@@ -134,21 +216,26 @@ awk '/^%changelog/ { exit } { print }' packaging/rpm/daymark.spec |
     echo "- Release ${VERSION}."
 } >>"${SPEC}"
 
-rpmbuild \
-    --define "_topdir ${RPMBUILD_DIR}" \
-    --define "_buildhost reproducible" \
-    --define "use_source_date_epoch_as_buildtime 1" \
-    --define "clamp_mtime_to_source_date_epoch 1" \
-    -bb "${SPEC}" >/dev/null
+RPMBUILD_ARGS=(
+    --define "_topdir ${RPMBUILD_DIR}"
+    --define "_buildhost reproducible"
+    --define "use_source_date_epoch_as_buildtime 1"
+    --define "clamp_mtime_to_source_date_epoch 1"
+)
+if [ "${CROSS}" = 1 ]; then
+    RPMBUILD_ARGS+=(--target "${ARCH}")
+fi
+rpmbuild "${RPMBUILD_ARGS[@]}" -bb "${SPEC}" >/dev/null
 
 shopt -s nullglob
-rpms=("${RPMBUILD_DIR}/RPMS/x86_64/"*.rpm)
+rpms=("${RPMBUILD_DIR}/RPMS/${ARCH}/"*.rpm)
 shopt -u nullglob
 [ "${#rpms[@]}" -eq 1 ] || {
     echo "Expected one built RPM, found ${#rpms[@]}." >&2
     exit 1
 }
 
-rm -f "${OUT_DIR}/daymark-${VERSION}-1.x86_64.rpm"
-cp "${rpms[0]}" "${OUT_DIR}/"
-echo "Built ${OUT_DIR}/$(basename "${rpms[0]}")"
+RPM="${OUT_DIR}/daymark-${VERSION}-1.${ARCH}.rpm"
+rm -f "${RPM}"
+cp "${rpms[0]}" "${RPM}"
+echo "Built ${RPM}"

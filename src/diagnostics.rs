@@ -613,7 +613,7 @@ mod tests {
 
         let report = collect(&paths, now, false, true);
         assert_eq!(report.db_error, None);
-        assert_eq!(report.schema_version, Some(2));
+        assert_eq!(report.schema_version, Some(6));
         assert_eq!(report.rows_today, 2);
         assert_eq!(report.open_session.as_ref().unwrap().app, "Example Editor");
         assert!(report.state_present);
@@ -634,7 +634,7 @@ mod tests {
         let output = render(&report);
         assert!(output.starts_with("Daymark doctor\n"));
         assert!(output.contains(&format!("database: {}\n", paths.db.display())));
-        assert!(output.contains("\nschema version: 2\n"));
+        assert!(output.contains("\nschema version: 6\n"));
         assert!(output.contains("\ndatabase size: "));
         assert!(output.contains("\nWAL size: "));
         assert!(output.contains("\nheartbeat age: "));

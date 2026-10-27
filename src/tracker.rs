@@ -3,10 +3,14 @@
 //! non-overlapping intervals.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+
+use inotify::{Inotify, WatchMask};
 
 use crate::date::{self, Day};
 use crate::db::Store;
@@ -23,6 +27,9 @@ pub enum TrackingStatus {
     Waiting,
     Stale,
     Error,
+    /// Audio or an idle inhibitor held the session open until the two-hour
+    /// cap. No new session starts until input returns.
+    Capped,
 }
 
 impl TrackingStatus {
@@ -35,6 +42,59 @@ impl TrackingStatus {
             TrackingStatus::Waiting => 4,
             TrackingStatus::Stale => 5,
             TrackingStatus::Error => 6,
+            TrackingStatus::Capped => 7,
+        }
+    }
+}
+
+/// What kept a session open besides, or instead of, recent input. The value
+/// is monotonic: `Input` can be upgraded but never downgraded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Presence {
+    #[default]
+    Input,
+    Inhibitor,
+    Audio,
+    Mixed,
+}
+
+impl Presence {
+    pub fn from_flags(inhibited: bool, audio: bool) -> Self {
+        match (inhibited, audio) {
+            (true, true) => Presence::Mixed,
+            (true, false) => Presence::Inhibitor,
+            (false, true) => Presence::Audio,
+            (false, false) => Presence::Input,
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Presence::Input => "input",
+            Presence::Inhibitor => "inhibitor",
+            Presence::Audio => "audio",
+            Presence::Mixed => "mixed",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Presence::Input => "input",
+            Presence::Inhibitor => "an inhibitor is active",
+            Presence::Audio => "audio is playing",
+            Presence::Mixed => "audio and an inhibitor are active",
+        }
+    }
+
+    fn merge(self, other: Presence) -> Presence {
+        match (self, other) {
+            (Presence::Mixed, _) | (_, Presence::Mixed) => Presence::Mixed,
+            (Presence::Input, value) | (value, Presence::Input) => value,
+            (Presence::Audio, Presence::Inhibitor) | (Presence::Inhibitor, Presence::Audio) => {
+                Presence::Mixed
+            }
+            (Presence::Audio, Presence::Audio) => Presence::Audio,
+            (Presence::Inhibitor, Presence::Inhibitor) => Presence::Inhibitor,
         }
     }
 }
@@ -47,6 +107,7 @@ pub struct LiveCurrent {
     pub icon: Option<String>,
     pub started: i64,
     pub elapsed: i64,
+    pub presence: Presence,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +139,9 @@ pub struct TrackerHandle {
     pub quit: Arc<AtomicBool>,
     reset: Arc<AtomicBool>,
     join: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// Present while the tracker waits on the watch. `unpark` remains the
+    /// fallback when the pipe could not be created.
+    wake_pipe: Arc<Mutex<Option<Arc<WakePipe>>>>,
 }
 
 impl TrackerHandle {
@@ -96,6 +160,7 @@ impl TrackerHandle {
             quit: Arc::new(AtomicBool::new(false)),
             reset: Arc::new(AtomicBool::new(false)),
             join: Arc::new(Mutex::new(None)),
+            wake_pipe: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -118,17 +183,14 @@ impl TrackerHandle {
         }
         if pause_changed {
             // A pause or resume takes effect at once instead of at the next
-            // two-second tick, so no further time is counted after a pause.
+            // event or fallback tick, so no further time is counted after a
+            // pause.
             self.wake();
         }
     }
     pub fn stop(&self) {
         self.quit.store(true, Ordering::Relaxed);
-        if let Ok(slot) = self.join.lock() {
-            if let Some(handle) = slot.as_ref() {
-                handle.thread().unpark();
-            }
-        }
+        self.wake();
     }
     /// Ask the tracker to discard all recorded intervals. It happens on the
     /// tracking thread so an open interval can never be re-created afterwards.
@@ -146,6 +208,11 @@ impl TrackerHandle {
         }
     }
     fn wake(&self) {
+        if let Ok(slot) = self.wake_pipe.lock() {
+            if let Some(pipe) = slot.as_ref() {
+                pipe.wake();
+            }
+        }
         if let Ok(slot) = self.join.lock() {
             if let Some(handle) = slot.as_ref() {
                 handle.thread().unpark();
@@ -168,6 +235,14 @@ struct ExtensionState {
     away_since: i64,
     idle: bool,
     locked: bool,
+    inhibited: bool,
+    audio: bool,
+    /// Milliseconds since the last input, as measured by Mutter.
+    idle_ms: i64,
+    /// The configured idle threshold the extension used, in seconds.
+    idle_seconds: i64,
+    /// The extension's write time in milliseconds since the Unix epoch.
+    stamp: i64,
 }
 
 struct StateReader {
@@ -246,6 +321,27 @@ fn parse_state(text: &str) -> Option<ExtensionState> {
             .get("locked")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        inhibited: value
+            .get("inhibited")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        audio: value
+            .get("audio")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        // idle_ms is always milliseconds. No unit heuristic is safe here:
+        // two hours of idleness is a legitimate value.
+        idle_ms: value
+            .get("idle_ms")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .max(0),
+        idle_seconds: value
+            .get("idle_seconds")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(300)
+            .max(1),
+        stamp: value.get("stamp").and_then(|v| v.as_i64()).unwrap_or(0),
     })
 }
 
@@ -258,6 +354,273 @@ const NOISE_FLOOR_SECS: i64 = 5;
 /// start of the next one: integer-second accounting can differ by one.
 const CONTIGUOUS_SLACK: i64 = 1;
 
+/// Audio playback and idle inhibitors may keep a session open without input,
+/// but never for longer than this from the last real input.
+const PRESENCE_CAP_SECS: i64 = 2 * 60 * 60;
+
+/// The pure presence decision, in precedence order: lock and idle always win,
+/// then a latched cap stays until input returns, then audio/inhibitor holds the
+/// session open for up to two hours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PresenceAction {
+    /// Away, locked or idle. The caller closes the session as usual. A cap
+    /// latch, if any, survives this branch.
+    Away,
+    Track(Presence),
+    Capped {
+        presence: Presence,
+        capped_at: i64,
+    },
+    /// The cap was already reached; audio or the inhibitor may have stopped,
+    /// but no new session starts until input returns.
+    StayCapped,
+}
+
+fn presence_action(latched: bool, state: &ExtensionState, now: i64) -> PresenceAction {
+    if state.away || state.locked || state.idle {
+        return PresenceAction::Away;
+    }
+    let presence = Presence::from_flags(state.inhibited, state.audio);
+    let input_returned = state.idle_ms < state.idle_seconds.saturating_mul(1000);
+    if latched {
+        return if input_returned {
+            PresenceAction::Track(presence)
+        } else {
+            PresenceAction::StayCapped
+        };
+    }
+    if presence == Presence::Input {
+        return PresenceAction::Track(Presence::Input);
+    }
+    let observed = if state.stamp > 10_000_000_000 {
+        state.stamp / 1000
+    } else if state.stamp > 1_000_000_000 {
+        state.stamp
+    } else {
+        now
+    };
+    let last_input = observed.saturating_sub(state.idle_ms / 1000);
+    let capped_at = last_input.saturating_add(PRESENCE_CAP_SECS);
+    if now >= capped_at {
+        PresenceAction::Capped {
+            presence,
+            capped_at,
+        }
+    } else {
+        PresenceAction::Track(presence)
+    }
+}
+
+fn cap_detail(presence: Presence) -> String {
+    format!(
+        "{} kept the session open for two hours without input. New time starts when input returns.",
+        match presence {
+            Presence::Audio => "Audio playback",
+            Presence::Inhibitor => "An idle inhibitor",
+            Presence::Mixed => "Audio and an idle inhibitor",
+            Presence::Input => "Audio or an idle inhibitor",
+        }
+    )
+}
+
+fn capped_wait_detail() -> &'static str {
+    "The audio or inhibitor cap is reached. New time starts when input returns."
+}
+
+/// The companion writes on every focus, idle and lock change and sends a
+/// heartbeat every 15 seconds. An inotify wake handles those at once; this is
+/// only the safety net for a missed event.
+const WATCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The pre-watch pace, kept for the fallback when no watch can be installed.
+const FALLBACK_POLL: Duration = Duration::from_secs(2);
+
+/// Close-write covers an in-place write; moved-to, create, delete and attrib
+/// cover an atomic replacement, a deletion and a permission change.
+const WATCH_MASK: WatchMask = WatchMask::CLOSE_WRITE
+    .union(WatchMask::MOVED_TO)
+    .union(WatchMask::CREATE)
+    .union(WatchMask::DELETE)
+    .union(WatchMask::ATTRIB);
+
+/// One tick may credit at most one full watch interval. A larger monotonic
+/// jump is still treated as a gap, so a missed suspend signal cannot turn
+/// sleep into usage.
+const MAX_CREDIT_SECS: i64 = WATCH_TIMEOUT.as_secs() as i64;
+const TICK_GAP_SECS: i64 = MAX_CREDIT_SECS + 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaitOutcome {
+    Event,
+    Timeout,
+}
+
+/// The pure part of the wait decision: a positive poll result is an event,
+/// zero is a timeout, and an error is also retried after the fallback wait.
+fn wait_outcome(ready: libc::c_int) -> WaitOutcome {
+    if ready > 0 {
+        WaitOutcome::Event
+    } else {
+        WaitOutcome::Timeout
+    }
+}
+
+/// How long to block without a filesystem event: the watch safety net when
+/// watching, the legacy poll when falling back.
+fn wait_timeout(watching: bool) -> Duration {
+    if watching {
+        WATCH_TIMEOUT
+    } else {
+        FALLBACK_POLL
+    }
+}
+
+/// A monotonic jump larger than the normal watch interval means the machine
+/// slept, or the process was stalled. A wall-clock jump with a small
+/// monotonic delta means the clock was adjusted. Credit neither.
+fn tick_gap(wall_delta: i64, mono_delta: i64) -> bool {
+    (wall_delta - mono_delta).abs() > 5 || mono_delta > TICK_GAP_SECS
+}
+
+/// A tick credits the elapsed monotonic time, capped at one watch interval,
+/// unless a gap made the elapsed time untrustworthy.
+fn credited_seconds(mono_delta: i64, gap: bool) -> i64 {
+    if gap {
+        0
+    } else {
+        mono_delta.clamp(0, MAX_CREDIT_SECS)
+    }
+}
+
+/// A self-pipe so IPC wakeups interrupt `poll` the same way `unpark` used to
+/// interrupt `park_timeout`.
+struct WakePipe {
+    read: OwnedFd,
+    write: OwnedFd,
+}
+
+impl WakePipe {
+    fn new() -> io::Result<Self> {
+        let mut fds = [0; 2];
+        let result = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        if result == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // The two descriptors are fresh and owned by this object.
+        let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        Ok(Self { read, write })
+    }
+
+    fn wake(&self) {
+        let byte = 1u8;
+        let _ = unsafe {
+            libc::write(
+                self.write.as_raw_fd(),
+                (&byte as *const u8).cast(),
+                std::mem::size_of_val(&byte),
+            )
+        };
+    }
+
+    fn drain(&self) {
+        let mut buffer = [0u8; 64];
+        loop {
+            let read = unsafe {
+                libc::read(
+                    self.read.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
+            };
+            if read <= 0 {
+                break;
+            }
+        }
+    }
+}
+
+/// The runtime-directory watch plus the wake pipe. Without a watch it still
+/// waits on the pipe with the fallback timeout, so IPC stays immediate.
+struct RuntimeWatch {
+    inotify: Option<Inotify>,
+    wake: Arc<WakePipe>,
+}
+
+impl RuntimeWatch {
+    fn new(directory: &Path, wake: Arc<WakePipe>) -> io::Result<Self> {
+        std::fs::create_dir_all(directory)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // The companion also creates this directory 0700. If the app gets
+            // there first, keep the state file private as well.
+            let _ = std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700));
+        }
+        let inotify = Inotify::init()?;
+        inotify.watches().add(directory, WATCH_MASK)?;
+        Ok(Self {
+            inotify: Some(inotify),
+            wake,
+        })
+    }
+
+    fn without_watch(wake: Arc<WakePipe>) -> Self {
+        Self {
+            inotify: None,
+            wake,
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        wait_timeout(self.inotify.is_some())
+    }
+
+    fn wait(&mut self, timeout: Duration) -> WaitOutcome {
+        let mut fds = [
+            libc::pollfd {
+                fd: self.inotify.as_ref().map(AsRawFd::as_raw_fd).unwrap_or(-1),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.wake.read.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let millis = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+        let ready = loop {
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
+            if ready < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            break ready;
+        };
+        if fds[1].revents & libc::POLLIN != 0 {
+            self.wake.drain();
+        }
+        if fds[0].revents & libc::POLLIN != 0 {
+            self.drain_events();
+        }
+        wait_outcome(ready)
+    }
+
+    fn drain_events(&mut self) {
+        let Some(inotify) = self.inotify.as_mut() else {
+            return;
+        };
+        let mut buffer = [0u8; 4096];
+        loop {
+            match inotify.read_events(&mut buffer) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 /// The most recently closed session that may still be extended: a following
 /// short focus merges into it, and an immediate return to the same app
 /// re-opens it instead of writing a duplicate adjacent row.
@@ -267,6 +630,7 @@ struct PrevSession {
     key: String,
     started: i64,
     ended: i64,
+    presence: Presence,
     /// False after a close caused by a gap, being away, a stale state file, a
     /// pause, or a midnight split: the time after such a close is never
     /// counted as belonging to this row.
@@ -282,6 +646,7 @@ struct OpenSession {
     started: i64,
     accumulated: i64,
     last_heartbeat: i64,
+    presence: Presence,
 }
 
 struct Tracker {
@@ -303,6 +668,14 @@ struct Tracker {
     ever_saw_state: bool,
     last_status: TrackingStatus,
     last_detail: String,
+    /// Set when audio/inhibitor reached the two-hour cap. It survives an
+    /// inhibitor or player stopping and clears only when input returns.
+    presence_capped: bool,
+    /// The last day the weekly digest was checked, so it runs once a day
+    /// without a second timer thread.
+    last_digest_check: Option<Day>,
+    /// The last day browser history was scanned for opt-in site names.
+    last_site_scan: Option<Day>,
 }
 
 fn resolve_key(focus: &ExtensionFocus) -> String {
@@ -355,6 +728,43 @@ impl Tracker {
             ever_saw_state,
             last_status: status,
             last_detail: detail,
+            presence_capped: false,
+            last_digest_check: None,
+            last_site_scan: None,
+        }
+    }
+
+    fn maybe_digest(&mut self, now_wall: i64) {
+        let today = Day::from_timestamp(now_wall);
+        if self.last_digest_check == Some(today) {
+            return;
+        }
+        self.last_digest_check = Some(today);
+        let mut settings = self.handle.settings();
+        if !settings.digest_enabled {
+            return;
+        }
+        match crate::digest::deliver_if_due(&self.store, &mut settings, today) {
+            Ok(true) => self.handle.set_settings(settings),
+            Ok(false) => {}
+            Err(error) => crate::logging::error("digest", &error),
+        }
+    }
+
+    fn maybe_scan_sites(&mut self, now_wall: i64) {
+        let today = Day::from_timestamp(now_wall);
+        if self.last_site_scan == Some(today) {
+            return;
+        }
+        self.last_site_scan = Some(today);
+        if !self.handle.settings().site_names_enabled {
+            return;
+        }
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            return;
+        };
+        if let Err(error) = crate::sites::scan_and_store(&self.store, &home, today, 14) {
+            crate::logging::error("sites", &error);
         }
     }
 
@@ -380,6 +790,7 @@ impl Tracker {
             icon: s.icon.clone(),
             started: s.started,
             elapsed: s.accumulated,
+            presence: s.presence,
         });
         if let Ok(mut live) = self.handle.live.lock() {
             live.current = current;
@@ -458,6 +869,7 @@ impl Tracker {
                 key: session.key,
                 started: session.started,
                 ended: end,
+                presence: session.presence,
                 mergeable,
             });
         }
@@ -471,7 +883,7 @@ impl Tracker {
     /// interruption, continue the previous row instead of writing a second
     /// adjacent row for the same app. Never spans a midnight or a branch that
     /// marked the previous session unmergeable.
-    fn try_resume_previous(&mut self, app: &ResolvedApp, now: i64) -> bool {
+    fn try_resume_previous(&mut self, app: &ResolvedApp, now: i64, presence: Presence) -> bool {
         let Some(prev) = self.previous.take() else {
             return false;
         };
@@ -492,6 +904,13 @@ impl Tracker {
             );
             return false;
         }
+        let merged = prev.presence.merge(presence);
+        if let Err(e) = self.store.set_session_presence(prev.db_id, merged.code()) {
+            self.set_status(
+                TrackingStatus::Error,
+                format!("Could not update presence: {e}"),
+            );
+        }
         self.current = Some(OpenSession {
             db_id: prev.db_id,
             app_id: prev.app_id,
@@ -501,12 +920,13 @@ impl Tracker {
             started: prev.started,
             accumulated: prev.ended - prev.started,
             last_heartbeat: prev.ended,
+            presence: merged,
         });
         self.publish_current();
         true
     }
 
-    fn start_session(&mut self, app: ResolvedApp, now: i64) {
+    fn start_session(&mut self, app: ResolvedApp, now: i64, presence: Presence) {
         let app_id = match self.store.upsert_app(&app, now) {
             Ok(id) => id,
             Err(e) => {
@@ -517,7 +937,10 @@ impl Tracker {
                 return;
             }
         };
-        match self.store.open_session(app_id, now) {
+        match self
+            .store
+            .open_session_with_presence(app_id, now, presence.code())
+        {
             Ok(db_id) => {
                 self.current = Some(OpenSession {
                     db_id,
@@ -528,6 +951,7 @@ impl Tracker {
                     started: now,
                     accumulated: 0,
                     last_heartbeat: now,
+                    presence,
                 });
                 self.publish_current();
             }
@@ -573,12 +997,14 @@ impl Tracker {
             }
         }
         let now_wall = date::unix_now();
+        self.maybe_digest(now_wall);
+        self.maybe_scan_sites(now_wall);
         let now_mono = Instant::now();
         let mono_delta = now_mono.duration_since(self.last_tick_mono).as_secs() as i64;
         let wall_delta = now_wall - self.last_tick_wall;
         // A large wall-clock jump with a small monotonic delta means the
         // machine slept, or the clock was adjusted. Credit neither.
-        let gap = (wall_delta - mono_delta).abs() > 5 || mono_delta > 10;
+        let gap = tick_gap(wall_delta, mono_delta);
         self.last_tick_wall = now_wall;
         self.last_tick_mono = now_mono;
 
@@ -626,7 +1052,7 @@ impl Tracker {
             self.maybe_prune();
         }
 
-        let delta = if gap { 0 } else { mono_delta.clamp(0, 5) };
+        let delta = credited_seconds(mono_delta, gap);
 
         let polled = self.reader.poll();
         let Some((state, age)) = polled else {
@@ -670,28 +1096,73 @@ impl Tracker {
             );
             return;
         }
-        if state.away {
-            if self.current.is_some() {
-                let end = if state.away_since > 0 {
-                    state.away_since.min(now_wall)
+        let presence = match presence_action(self.presence_capped, &state, now_wall) {
+            PresenceAction::Away => {
+                if self.current.is_some() {
+                    let end = if state.away_since > 0 {
+                        state.away_since.min(now_wall)
+                    } else {
+                        self.current
+                            .as_ref()
+                            .map(|s| s.started + s.accumulated)
+                            .unwrap_or(now_wall)
+                    };
+                    self.close_current(end, false);
+                }
+                let detail = if state.locked {
+                    "The screen is locked"
+                } else if state.idle {
+                    "No input for a while"
                 } else {
-                    self.current
-                        .as_ref()
-                        .map(|s| s.started + s.accumulated)
-                        .unwrap_or(now_wall)
+                    "Away from the computer"
                 };
-                self.close_current(end, false);
+                self.set_status(TrackingStatus::Away, detail);
+                return;
             }
-            let detail = if state.locked {
-                "The screen is locked"
-            } else if state.idle {
-                "No input for a while"
-            } else {
-                "Away from the computer"
-            };
-            self.set_status(TrackingStatus::Away, detail);
-            return;
-        }
+            PresenceAction::StayCapped => {
+                if let Some(session) = &self.current {
+                    let end = session.started + session.accumulated;
+                    self.close_current(end, false);
+                }
+                self.presence_capped = true;
+                self.set_status(TrackingStatus::Capped, capped_wait_detail());
+                return;
+            }
+            PresenceAction::Capped {
+                presence,
+                capped_at,
+            } => {
+                let mut presence_error = None;
+                if let Some(session) = &mut self.current {
+                    let merged = session.presence.merge(presence);
+                    if merged != session.presence {
+                        session.presence = merged;
+                        if let Err(e) = self
+                            .store
+                            .set_session_presence(session.db_id, merged.code())
+                        {
+                            presence_error = Some(e);
+                        }
+                    }
+                }
+                if let Some(e) = presence_error {
+                    self.set_status(
+                        TrackingStatus::Error,
+                        format!("Could not update presence: {e}"),
+                    );
+                }
+                if self.current.is_some() {
+                    self.close_current(capped_at, false);
+                }
+                self.presence_capped = true;
+                self.set_status(TrackingStatus::Capped, cap_detail(presence));
+                return;
+            }
+            PresenceAction::Track(presence) => {
+                self.presence_capped = false;
+                presence
+            }
+        };
         let Some(focus) = state.focus else {
             if let Some(session) = &self.current {
                 let end = session.started + session.accumulated;
@@ -730,12 +1201,18 @@ impl Tracker {
                 };
                 self.close_current(end, !crossed_midnight);
             }
-            if crossed_midnight || !self.try_resume_previous(&app, now_wall) {
-                self.start_session(app.clone(), now_wall);
+            if crossed_midnight || !self.try_resume_previous(&app, now_wall, presence) {
+                self.start_session(app.clone(), now_wall, presence);
             }
         } else {
             let mut heartbeat = None;
+            let mut presence_update = None;
             let published = if let Some(session) = &mut self.current {
+                let merged = session.presence.merge(presence);
+                if merged != session.presence {
+                    session.presence = merged;
+                    presence_update = Some((session.db_id, merged.code()));
+                }
                 session.accumulated = session.accumulated.saturating_add(delta);
                 let end = session.started.saturating_add(session.accumulated);
                 if end - session.last_heartbeat >= 30 {
@@ -749,10 +1226,19 @@ impl Tracker {
                     icon: session.icon.clone(),
                     started: session.started,
                     elapsed: session.accumulated,
+                    presence: session.presence,
                 })
             } else {
                 None
             };
+            if let Some((db_id, presence)) = presence_update {
+                if let Err(e) = self.store.set_session_presence(db_id, presence) {
+                    self.set_status(
+                        TrackingStatus::Error,
+                        format!("Could not update presence: {e}"),
+                    );
+                }
+            }
             if let Some((db_id, end)) = heartbeat {
                 if let Err(e) = self.store.heartbeat_session(db_id, end) {
                     self.set_status(
@@ -768,18 +1254,32 @@ impl Tracker {
                 }
             }
         }
-        let detail = format!("Tracking {}", app.name);
+        let detail = if presence == Presence::Input {
+            format!("Tracking {}", app.name)
+        } else {
+            format!("Tracking {} — {}", app.name, presence.label())
+        };
         self.set_status(TrackingStatus::Active, detail);
     }
 }
 
 pub fn spawn(store: Store, settings: Settings) -> TrackerHandle {
+    let wake_pipe = match WakePipe::new() {
+        Ok(pipe) => Some(Arc::new(pipe)),
+        Err(error) => {
+            eprintln!(
+                "daymark: could not create the tracker wake pipe ({error}); using the two-second fallback poll"
+            );
+            None
+        }
+    };
     let handle = TrackerHandle {
         live: Arc::new(Mutex::new(LiveState::default())),
         settings: Arc::new(Mutex::new(settings)),
         quit: Arc::new(AtomicBool::new(false)),
         reset: Arc::new(AtomicBool::new(false)),
         join: Arc::new(Mutex::new(None)),
+        wake_pipe: Arc::new(Mutex::new(wake_pipe.clone())),
     };
     let thread_handle = handle.clone();
     let join_slot = handle.join.clone();
@@ -787,12 +1287,34 @@ pub fn spawn(store: Store, settings: Settings) -> TrackerHandle {
         .name("daymark-tracker".into())
         .spawn(move || {
             let mut tracker = Tracker::new(store, thread_handle.clone());
+            let state_path = platform::state_path();
+            let directory = state_path.parent().unwrap_or_else(|| Path::new("."));
+            let mut watch = wake_pipe.map(|pipe| {
+                // A watch on the runtime directory covers both an in-place
+                // write and the temporary-file rename the companion uses for
+                // an atomic replacement.
+                match RuntimeWatch::new(directory, pipe.clone()) {
+                    Ok(watch) => watch,
+                    Err(error) => {
+                        eprintln!(
+                            "daymark: could not watch the runtime directory ({error}); using the two-second fallback poll"
+                        );
+                        RuntimeWatch::without_watch(pipe)
+                    }
+                }
+            });
             while !thread_handle.quit.load(Ordering::Relaxed) {
                 tracker.tick();
-                // Two seconds is forgiving enough for input/idle transitions
-                // while waking the CPU only 30 times a minute. `park_timeout`
-                // is interrupted immediately by `stop()`/`request_reset()`.
-                std::thread::park_timeout(Duration::from_secs(2));
+                match watch.as_mut() {
+                    Some(watch) => {
+                        // An inotify event wakes this at once. The timeout is
+                        // the 30-second safety net for a missed event, or the
+                        // old two-second poll when no watch could be made.
+                        let timeout = watch.timeout();
+                        watch.wait(timeout);
+                    }
+                    None => std::thread::park_timeout(FALLBACK_POLL),
+                }
             }
             if let Some(session) = &tracker.current {
                 let end = session.started + session.accumulated;
@@ -840,10 +1362,275 @@ mod tests {
     }
 
     #[test]
+    fn parses_idle_milliseconds_audio_and_inhibitors() {
+        let text = r#"{"v":3,"seq":2,"stamp":1710000000000,"focus":null,"away":false,"away_since":0,"idle":false,"locked":false,"inhibited":true,"audio":true,"idle_ms":7200000,"idle_seconds":300}"#;
+        let state = parse_state(text).unwrap();
+        assert_eq!(state.idle_ms, 7_200_000);
+        assert_eq!(state.idle_seconds, 300);
+        assert!(state.inhibited);
+        assert!(state.audio);
+        // The stamp is milliseconds; the cap is evaluated in seconds.
+        assert_eq!(
+            presence_action(false, &state, 1_710_000_000),
+            PresenceAction::Capped {
+                presence: Presence::Mixed,
+                capped_at: 1_710_000_000,
+            }
+        );
+    }
+
+    #[test]
+    fn older_state_files_default_to_recent_input() {
+        let text =
+            r#"{"v":1,"focus":null,"away":false,"away_since":0,"idle":false,"locked":false}"#;
+        let state = parse_state(text).unwrap();
+        assert_eq!(state.idle_ms, 0);
+        assert_eq!(state.idle_seconds, 300);
+        assert!(!state.inhibited);
+        assert!(!state.audio);
+        assert_eq!(
+            presence_action(false, &state, 1_710_000_000),
+            PresenceAction::Track(Presence::Input)
+        );
+    }
+
+    #[test]
     fn ignores_malformed_state() {
         assert!(parse_state("not json").is_none());
         assert!(parse_state("{}").is_none());
         assert!(parse_state(r#"{"v":0}"#).is_none());
+    }
+
+    fn presence_state(inhibited: bool, audio: bool, idle_ms: i64, now: i64) -> ExtensionState {
+        ExtensionState {
+            inhibited,
+            audio,
+            idle_ms,
+            idle_seconds: 300,
+            stamp: now.saturating_mul(1000),
+            ..ExtensionState::default()
+        }
+    }
+
+    #[test]
+    fn audio_caps_at_last_input_plus_two_hours() {
+        let now = 1_800_000_000;
+        let state = presence_state(false, true, 3 * 3600 * 1000, now);
+        assert_eq!(
+            presence_action(false, &state, now),
+            PresenceAction::Capped {
+                presence: Presence::Audio,
+                // Last input was three hours ago, so the cap is one hour ago.
+                capped_at: now - 3600,
+            }
+        );
+    }
+
+    #[test]
+    fn exactly_two_hours_reaches_the_cap() {
+        let now = 1_800_000_000;
+        let state = presence_state(true, false, PRESENCE_CAP_SECS * 1000, now);
+        assert_eq!(
+            presence_action(false, &state, now),
+            PresenceAction::Capped {
+                presence: Presence::Inhibitor,
+                capped_at: now,
+            }
+        );
+    }
+
+    #[test]
+    fn recent_input_holds_presence_without_capping() {
+        let now = 1_800_000_000;
+        let state = presence_state(true, true, 60_000, now);
+        assert_eq!(
+            presence_action(false, &state, now),
+            PresenceAction::Track(Presence::Mixed)
+        );
+        let audio = presence_state(false, true, 60_000, now);
+        assert_eq!(
+            presence_action(false, &audio, now),
+            PresenceAction::Track(Presence::Audio)
+        );
+    }
+
+    #[test]
+    fn input_returns_and_clears_a_latched_cap() {
+        let now = 1_800_000_000;
+        let state = presence_state(false, true, 0, now);
+        assert_eq!(
+            presence_action(true, &state, now),
+            PresenceAction::Track(Presence::Audio)
+        );
+        // With no presence at all, the next tick records plain input.
+        let input = presence_state(false, false, 0, now);
+        assert_eq!(
+            presence_action(true, &input, now),
+            PresenceAction::Track(Presence::Input)
+        );
+    }
+
+    #[test]
+    fn a_stopped_player_keeps_the_cap_until_input_returns() {
+        let now = 1_800_000_000;
+        // The cap latched while audio played, then the player stopped. The
+        // idle monitor still reports hours without input.
+        let state = presence_state(false, false, 3 * 3600 * 1000, now);
+        assert_eq!(
+            presence_action(true, &state, now),
+            PresenceAction::StayCapped
+        );
+    }
+
+    #[test]
+    fn lock_and_idle_take_precedence_over_presence() {
+        let now = 1_800_000_000;
+        let mut locked = presence_state(true, true, 3 * 3600 * 1000, now);
+        locked.locked = true;
+        assert_eq!(presence_action(false, &locked, now), PresenceAction::Away);
+        assert_eq!(presence_action(true, &locked, now), PresenceAction::Away);
+
+        let mut idle = presence_state(true, true, 3 * 3600 * 1000, now);
+        idle.idle = true;
+        assert_eq!(presence_action(false, &idle, now), PresenceAction::Away);
+
+        let mut away = presence_state(true, true, 3 * 3600 * 1000, now);
+        away.away = true;
+        assert_eq!(presence_action(false, &away, now), PresenceAction::Away);
+    }
+
+    #[test]
+    fn presence_merges_monotonically() {
+        assert_eq!(Presence::Input.merge(Presence::Audio), Presence::Audio);
+        assert_eq!(Presence::Audio.merge(Presence::Inhibitor), Presence::Mixed);
+        assert_eq!(Presence::Mixed.merge(Presence::Input), Presence::Mixed);
+    }
+
+    #[test]
+    fn wait_decision_distinguishes_events_from_timeouts() {
+        assert_eq!(wait_outcome(1), WaitOutcome::Event);
+        assert_eq!(wait_outcome(2), WaitOutcome::Event);
+        assert_eq!(wait_outcome(0), WaitOutcome::Timeout);
+        assert_eq!(wait_outcome(-1), WaitOutcome::Timeout);
+    }
+
+    #[test]
+    fn the_watch_waits_longer_than_the_fallback() {
+        assert_eq!(wait_timeout(true), Duration::from_secs(30));
+        assert_eq!(wait_timeout(false), Duration::from_secs(2));
+        assert!(wait_timeout(true) > wait_timeout(false));
+    }
+
+    #[test]
+    fn the_watch_covers_replacement_and_deletion() {
+        for event in [
+            WatchMask::CLOSE_WRITE,
+            WatchMask::MOVED_TO,
+            WatchMask::CREATE,
+            WatchMask::DELETE,
+            WatchMask::ATTRIB,
+        ] {
+            assert!(WATCH_MASK.contains(event), "missing {event:?}");
+        }
+    }
+
+    #[test]
+    fn a_heartbeat_interval_is_credited_in_full() {
+        // The companion sends a heartbeat every 15 seconds, so a tick may be
+        // that far apart without being treated as a stall.
+        assert!(!tick_gap(15, 15));
+        assert_eq!(credited_seconds(15, false), 15);
+        assert!(!tick_gap(30, 30));
+        assert_eq!(credited_seconds(30, false), 30);
+        // A late tick is capped at one watch interval.
+        assert_eq!(credited_seconds(45, false), MAX_CREDIT_SECS);
+        // A stalled process or a sleeping machine earns no credit.
+        assert!(tick_gap(36, 36));
+        assert!(tick_gap(3600, 5));
+        assert!(tick_gap(5, 3600));
+        assert_eq!(credited_seconds(45, true), 0);
+    }
+
+    #[test]
+    fn a_real_watch_wakes_on_a_state_file_write() {
+        let dir = TempDir::new("watch-write");
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let mut watch = RuntimeWatch::new(&dir.0, wake).unwrap();
+        assert_eq!(watch.timeout(), WATCH_TIMEOUT);
+        write_state(
+            &dir.state_path(),
+            1,
+            Some(("org.example.Alpha", "Alpha")),
+            false,
+            0,
+        );
+        assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
+        // With no further change the watch falls through to its timeout.
+        assert_eq!(watch.wait(Duration::from_millis(150)), WaitOutcome::Timeout);
+    }
+
+    #[test]
+    fn a_real_watch_wakes_on_atomic_replacement_and_deletion() {
+        let dir = TempDir::new("watch-replace");
+        std::fs::write(dir.state_path(), "{}").unwrap();
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let mut watch = RuntimeWatch::new(&dir.0, wake).unwrap();
+        let temporary = dir.0.join("state.json.tmp");
+        std::fs::write(&temporary, "{}").unwrap();
+        std::fs::rename(&temporary, dir.state_path()).unwrap();
+        assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
+        std::fs::remove_file(dir.state_path()).unwrap();
+        assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
+    }
+
+    #[test]
+    fn the_wake_pipe_interrupts_a_long_wait() {
+        let dir = TempDir::new("watch-wake");
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let mut watch = RuntimeWatch::new(&dir.0, wake.clone()).unwrap();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            wake.wake();
+        });
+        assert_eq!(watch.wait(Duration::from_secs(5)), WaitOutcome::Event);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_wake_pipe_alone_uses_the_fallback_timeout() {
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let mut watch = RuntimeWatch::without_watch(wake.clone());
+        assert_eq!(watch.timeout(), FALLBACK_POLL);
+        let timeout = watch.timeout();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            wake.wake();
+        });
+        assert_eq!(watch.wait(timeout), WaitOutcome::Event);
+        assert!(started.elapsed() < FALLBACK_POLL);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_watch_keeps_the_runtime_directory_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("watch-perms");
+        let runtime = dir.0.join("runtime");
+        let wake = Arc::new(WakePipe::new().unwrap());
+        let _watch = RuntimeWatch::new(&runtime, wake).unwrap();
+        let mode = std::fs::metadata(&runtime).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn an_unwatchable_path_reports_an_error() {
+        let dir = TempDir::new("watch-error");
+        let file = dir.0.join("plain-file");
+        std::fs::write(&file, "").unwrap();
+        let wake = Arc::new(WakePipe::new().unwrap());
+        assert!(RuntimeWatch::new(&file.join("runtime"), wake).is_err());
     }
 
     struct TempDir(std::path::PathBuf);
@@ -894,6 +1681,31 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn write_presence_state(
+        path: &std::path::Path,
+        seq: u32,
+        focus: Option<(&str, &str)>,
+        away: bool,
+        away_since: i64,
+        idle_ms: i64,
+        inhibited: bool,
+        audio: bool,
+    ) {
+        let focus_json = match focus {
+            Some((id, name)) => {
+                format!(r#"{{"id":"{id}","name":"{name}","wm_class":null,"pid":null}}"#)
+            }
+            None => "null".to_string(),
+        };
+        let pad = " ".repeat(seq as usize % 7);
+        let body = format!(
+            r#"{{"v":3,"seq":{seq},"stamp":{},"focus":{focus_json},"away":{away},"away_since":{away_since},"idle":{away},"locked":false,"inhibited":{inhibited},"audio":{audio},"idle_ms":{idle_ms},"idle_seconds":300,"pad":"{pad}"}}"#,
+            date::unix_now() * 1000
+        );
+        std::fs::write(path, body).unwrap();
+    }
+
     fn make_tracker(dir: &TempDir) -> Tracker {
         let store = Store::open_at(&dir.db_path()).unwrap();
         let settings = Settings::default();
@@ -918,6 +1730,9 @@ mod tests {
             ever_saw_state: false,
             last_status: TrackingStatus::Active,
             last_detail: String::new(),
+            presence_capped: false,
+            last_digest_check: Some(Day::today()),
+            last_site_scan: Some(Day::today()),
         }
     }
 
@@ -1008,6 +1823,110 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].started, start);
         assert_eq!(rows[0].ended, start + 1);
+    }
+
+    #[test]
+    fn recent_input_marks_an_open_session_with_audio_presence() {
+        let dir = TempDir::new("audio-mark");
+        let mut tracker = make_tracker(&dir);
+        let now = date::unix_now();
+        open_fake(&mut tracker, "app:org.example.video", now - 60);
+        let db_id = tracker.current.as_ref().unwrap().db_id;
+        write_presence_state(
+            &dir.state_path(),
+            1,
+            Some(("org.example.Video", "Video")),
+            false,
+            0,
+            0,
+            false,
+            true,
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        tracker.tick();
+        assert_eq!(tracker.current.as_ref().unwrap().presence, Presence::Audio);
+        assert_eq!(
+            tracker.store.session_presence(db_id).as_deref(),
+            Some("audio")
+        );
+        assert_eq!(tracker.last_status, TrackingStatus::Active);
+    }
+
+    #[test]
+    fn audio_closes_at_the_cap_and_waits_for_input() {
+        let dir = TempDir::new("audio-cap");
+        let mut tracker = make_tracker(&dir);
+        let now = date::unix_now();
+        open_fake(&mut tracker, "app:org.example.video", now - 4 * 3600);
+        let db_id = tracker.current.as_ref().unwrap().db_id;
+
+        // Three hours without input: the row must end at last input + 2h and
+        // still record the audio presence that reached the cap.
+        let state_now = date::unix_now();
+        write_presence_state(
+            &dir.state_path(),
+            1,
+            Some(("org.example.Video", "Video")),
+            false,
+            0,
+            3 * 3600 * 1000,
+            false,
+            true,
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        tracker.tick();
+        assert!(tracker.current.is_none());
+        assert_eq!(tracker.last_status, TrackingStatus::Capped);
+        assert!(tracker.last_detail.contains("two hours"));
+        let rows = rows(&tracker);
+        assert_eq!(rows.len(), 1, "rows: {rows:?}");
+        assert!(
+            (rows[0].ended - (state_now - 3600)).abs() <= 1,
+            "cap should end at last input + 2h, got {} for {state_now}",
+            rows[0].ended
+        );
+        assert_eq!(
+            tracker.store.session_presence(db_id).as_deref(),
+            Some("audio")
+        );
+
+        // No new row starts while input stays away, even though the cap is
+        // already latched and the player is still reporting.
+        write_presence_state(
+            &dir.state_path(),
+            3,
+            Some(("org.example.Video", "Video")),
+            false,
+            0,
+            3 * 3600 * 1000,
+            false,
+            true,
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        tracker.tick();
+        assert!(tracker.current.is_none());
+        assert_eq!(tracker.store.session_count(), 1);
+
+        // Input returns: tracking starts a fresh row with the audio presence.
+        write_presence_state(
+            &dir.state_path(),
+            4,
+            Some(("org.example.Video", "Video")),
+            false,
+            0,
+            0,
+            false,
+            true,
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        tracker.tick();
+        let current = tracker.current.as_ref().unwrap();
+        assert_eq!(current.presence, Presence::Audio);
+        assert_eq!(
+            tracker.store.session_presence(current.db_id).as_deref(),
+            Some("audio")
+        );
+        assert_eq!(tracker.last_status, TrackingStatus::Active);
     }
 
     #[test]
@@ -1111,6 +2030,7 @@ mod tests {
             key: app.key,
             started,
             ended,
+            presence: Presence::Input,
             mergeable,
         });
     }
@@ -1128,6 +2048,7 @@ mod tests {
             started,
             accumulated: 0,
             last_heartbeat: started,
+            presence: Presence::Input,
         });
     }
 

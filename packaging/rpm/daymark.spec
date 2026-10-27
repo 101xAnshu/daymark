@@ -13,6 +13,7 @@ BuildArch:      x86_64
 Requires:       glibc >= 2.35
 Requires:       libgcc
 Recommends:     gnome-shell >= 48
+Recommends:     gnome-shell-extension-appindicator
 
 %description
 Daymark records how long each application is used and presents a calm daily
@@ -44,6 +45,7 @@ cp -a . %{buildroot}/
 %{_datadir}/gnome-shell/extensions/daymark@daymark.app/
 %{_docdir}/daymark/copyright
 %{_docdir}/daymark/changelog
+/usr/lib/systemd/user/daymark.service
 
 %changelog
 * Mon Oct 26 2026 Daymark contributors <maintainers@daymark.app> - 0.1.1-1

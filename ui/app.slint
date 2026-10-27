@@ -2,13 +2,16 @@ export { Theme } from "theme.slint";
 import { Theme, Hairline, SlidersIcon, CloseIcon, SearchIcon, Chevron, Switch, Chip, TextButton, PrimaryButton, WindowControl, EmptyMark, AppIcon } from "theme.slint";
 
 export struct AppRow {
+    app-id: int,
     name: string,
     duration: string,
+    share: string,
     ratio: float,
     initial: string,
     has-icon: bool,
     icon: image,
     tint: color,
+    ignored: bool,
 }
 
 export struct DayBar {
@@ -25,6 +28,22 @@ export struct HourBar {
     ratio: float,
 }
 
+export struct HeatCell {
+    ratio: float,
+}
+
+export struct HeatRow {
+    label: string,
+    total: string,
+    cells: [HeatCell],
+}
+
+export struct SiteRow {
+    domain: string,
+    duration: string,
+    ratio: float,
+}
+
 export struct HistoryRow {
     label: string,
     date: string,
@@ -32,6 +51,59 @@ export struct HistoryRow {
     ratio: float,
     is-today: bool,
     offset: int,
+}
+
+export struct MetricRow {
+    label: string,
+    value: string,
+    detail: string,
+    show-rule: bool,
+    accent: bool,
+}
+
+export struct TimelineSegment {
+    start: float,
+    width: float,
+    tint: color,
+}
+
+component MetricCell inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <string> detail;
+    in property <bool> accent: false;
+    height: 70px;
+
+    VerticalLayout {
+        horizontal-stretch: 1;
+        padding-left: 18px;
+        padding-right: 18px;
+        spacing: 3px;
+        alignment: center;
+
+        Text {
+            text: root.label;
+            font-size: Theme.micro-size;
+            font-weight: 600;
+            color: Theme.text-secondary;
+            letter-spacing: 0.5px;
+            overflow: elide;
+        }
+        Text {
+            text: root.value;
+            font-size: 16px;
+            font-weight: 600;
+            color: root.accent ? Theme.accent-text : Theme.text;
+            overflow: elide;
+        }
+        Text {
+            text: root.detail;
+            font-size: Theme.micro-size;
+            color: Theme.text-tertiary;
+            visible: root.detail != "";
+            overflow: elide;
+        }
+    }
 }
 
 export component AppWindow inherits Window {
@@ -48,7 +120,7 @@ export component AppWindow inherits Window {
     forward-focus: key-root;
 
     // --- Data -------------------------------------------------------------
-    in property <int> view: 0; // 0 = day, 1 = history
+    in property <int> view: 0; // 0 = day, 1 = history, 2 = rhythm
     in property <int> selected-offset: 0;
     in property <string> date-kicker: "";
     in property <string> total-text: "0m";
@@ -62,6 +134,19 @@ export component AppWindow inherits Window {
     in property <string> apps-caption: "";
     in property <string> peak-text: "";
     in property <[HourBar]> hours: [];
+    in property <[MetricRow]> metrics: [];
+    in property <[TimelineSegment]> timeline: [];
+    in property <bool> has-timeline: false;
+    // The selected day kept its daily total but no raw intervals, so hourly
+    // detail and the timeline are unavailable.
+    in property <bool> totals-only: false;
+    // Quiet note under the timeline, e.g. "12m with audio or a video playing".
+    in property <string> presence-note: "";
+    in property <[HeatRow]> heatmap: [];
+    in property <string> heatmap-total: "";
+    in property <bool> has-heatmap: false;
+    in property <bool> site-names-enabled: false;
+    in property <[SiteRow]> sites: [];
     in property <string> history-total: "0m";
     in property <string> history-summary: "";
     in property <[HistoryRow]> history: [];
@@ -97,8 +182,16 @@ export component AppWindow inherits Window {
     in property <int> retention-days: 365;
     in property <int> theme-pref: 0;
     in property <bool> autostart: false;
+    in property <bool> digest-enabled: false;
+    in property <int> ignored-app-count: 0;
+    in property <bool> show-ignored: false;
+    in property <bool> app-editor-open: false;
+    in property <string> app-editor-name: "";
+    in-out property <string> app-editor-alias: "";
+    in property <bool> app-editor-ignored: false;
     in property <string> settings-error: "";
     in property <string> app-version: "0.1.1";
+    in property <string> update-notice: "";
     in property <bool> recovered: false;
     in-out property <bool> maximized: false;
     in-out property <bool> header-dragging: false;
@@ -121,6 +214,13 @@ export component AppWindow inherits Window {
     callback set-retention(int);
     callback set-theme(int);
     callback set-autostart(bool);
+    callback set-digest-enabled(bool);
+    callback set-site-names-enabled(bool);
+    callback edit-app(int);
+    callback close-app-editor();
+    callback save-app-alias(string);
+    callback set-app-ignored(bool);
+    callback toggle-show-ignored();
     // Pause for the given number of seconds; 0 pauses until resumed.
     callback pause-for(int);
     callback search-changed(string);
@@ -178,6 +278,10 @@ export component AppWindow inherits Window {
             }
             if (event.modifiers.control && event.text == "2") {
                 root.set-view(1);
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "3") {
+                root.set-view(2);
                 return accept;
             }
             if (event.text == "\u{1b}") {
@@ -311,7 +415,7 @@ export component AppWindow inherits Window {
 
                     // Segmented view control
                     Rectangle {
-                        width: 136px;
+                        width: 204px;
                         height: 32px;
                         border-radius: 9px;
                         background: Theme.surface-muted;
@@ -350,6 +454,21 @@ export component AppWindow inherits Window {
                                     vertical-alignment: center;
                                 }
                                 TouchArea { mouse-cursor: pointer; clicked => { key-root.focus(); root.set-view(1); } }
+                            }
+                            rhythm-tab := Rectangle {
+                                horizontal-stretch: 1;
+                                border-radius: 6px;
+                                background: root.view == 2 ? Theme.surface : transparent;
+                                animate background { duration: 140ms; }
+                                Text {
+                                    text: "Rhythm";
+                                    font-size: Theme.small-size;
+                                    font-weight: root.view == 2 ? 600 : 500;
+                                    color: root.view == 2 ? Theme.text : Theme.text-secondary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                TouchArea { mouse-cursor: pointer; clicked => { key-root.focus(); root.set-view(2); } }
                             }
                         }
                     }
@@ -570,11 +689,168 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // ---- Weekly chart ----
+                            // ---- Day metrics ----
                             Rectangle {
-                                height: root.show-banner ? 30px : 18px;
+                                height: root.show-banner ? 24px : 20px;
                                 background: transparent;
                             }
+
+                            Rectangle {
+                                height: 70px;
+                                border-radius: Theme.radius-md;
+                                background: Theme.surface;
+                                border-width: 1px;
+                                border-color: Theme.line;
+
+                                HorizontalLayout {
+                                    width: 100%;
+                                    height: 70px;
+
+                                    for metric in root.metrics:
+                                        HorizontalLayout {
+                                            horizontal-stretch: 1;
+                                            height: 70px;
+                                            Rectangle {
+                                                visible: metric.show-rule;
+                                                width: 1px;
+                                                height: 38px;
+                                                background: Theme.line;
+                                            }
+                                            MetricCell {
+                                                horizontal-stretch: 1;
+                                                label: metric.label;
+                                                value: metric.value;
+                                                detail: metric.detail;
+                                                accent: metric.accent;
+                                            }
+                                        }
+                                }
+                            }
+
+                            // ---- Day timeline ----
+                            Rectangle { height: 26px; background: transparent; }
+
+                            HorizontalLayout {
+                                width: 100%;
+                                Text {
+                                    text: "Day timeline";
+                                    font-size: Theme.body-size;
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text {
+                                    text: root.totals-only ? "Totals only" : "00:00 – 24:00";
+                                    font-size: Theme.micro-size;
+                                    color: Theme.text-tertiary;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Rectangle { height: 10px; background: transparent; }
+
+                            Rectangle {
+                                height: 34px;
+                                border-radius: 8px;
+                                background: Theme.surface-muted;
+                                clip: true;
+
+                                for segment in root.timeline:
+                                    Rectangle {
+                                        x: parent.width * segment.start;
+                                        width: max(1px, parent.width * segment.width);
+                                        height: 100%;
+                                        background: segment.tint;
+                                        opacity: 0.86;
+                                    }
+
+                                if (!root.has-timeline && !root.totals-only) : Text {
+                                    text: "Nothing recorded on this day";
+                                    width: 100%;
+                                    height: 100%;
+                                    font-size: Theme.small-size;
+                                    color: Theme.text-tertiary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                if (root.totals-only) : Text {
+                                    text: "Totals only · hourly detail is unavailable for a rolled-up day";
+                                    width: 100%;
+                                    height: 100%;
+                                    font-size: Theme.small-size;
+                                    color: Theme.text-tertiary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                            if (root.presence-note != "") : Text {
+                                height: 18px;
+                                text: "•  " + root.presence-note;
+                                font-size: Theme.micro-size;
+                                color: Theme.text-secondary;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Rectangle { height: 7px; background: transparent; }
+
+                            timeline-axis := Rectangle {
+                                height: 14px;
+                                background: transparent;
+                                visible: !root.totals-only;
+                                property <length> slot: self.width / 24;
+                                Text {
+                                    x: 0px;
+                                    width: 44px;
+                                    height: 100%;
+                                    text: "00:00";
+                                    font-size: Theme.micro-size;
+                                    color: Theme.text-tertiary;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    x: timeline-axis.slot * 6 - 20px;
+                                    width: 40px;
+                                    height: 100%;
+                                    text: "06:00";
+                                    font-size: Theme.micro-size;
+                                    color: Theme.text-tertiary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    x: timeline-axis.slot * 12 - 20px;
+                                    width: 40px;
+                                    height: 100%;
+                                    text: "12:00";
+                                    font-size: Theme.micro-size;
+                                    color: Theme.text-tertiary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    x: timeline-axis.slot * 18 - 20px;
+                                    width: 40px;
+                                    height: 100%;
+                                    text: "18:00";
+                                    font-size: Theme.micro-size;
+                                    color: Theme.text-tertiary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    x: timeline-axis.width - 44px;
+                                    width: 44px;
+                                    height: 100%;
+                                    text: "24:00";
+                                    font-size: Theme.micro-size;
+                                    color: Theme.text-tertiary;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            // ---- Weekly chart ----
+                            Rectangle { height: 26px; background: transparent; }
 
                             HorizontalLayout {
                                 Text {
@@ -687,6 +963,13 @@ export component AppWindow inherits Window {
                                             vertical-alignment: center;
                                             visible: root.apps-caption != "";
                                         }
+                                        if (root.ignored-app-count > 0) : TextButton {
+                                            label: root.show-ignored
+                                                ? "Hide ignored"
+                                                : "Show ignored (" + root.ignored-app-count + ")";
+                                            tint: Theme.text-tertiary;
+                                            clicked => { root.toggle-show-ignored(); }
+                                        }
                                         Rectangle { horizontal-stretch: 1; }
                                         Rectangle {
                                             visible: root.apps.length > 0 || root.search-text != "";
@@ -795,6 +1078,7 @@ export component AppWindow inherits Window {
                                                 height: 48px;
                                                 border-radius: 9px;
                                                 background: transparent;
+                                                opacity: app.ignored ? 0.55 : 1.0;
 
                                                 AppIcon {
                                                     x: 6px;
@@ -808,7 +1092,7 @@ export component AppWindow inherits Window {
                                                 Rectangle {
                                                     x: 44px;
                                                     y: 0px;
-                                                    width: parent.width - 110px;
+                                                    width: parent.width - 220px;
                                                     height: 48px;
                                                     background: transparent;
 
@@ -841,7 +1125,20 @@ export component AppWindow inherits Window {
                                                 }
 
                                                 Text {
-                                                    x: parent.width - 66px;
+                                                    x: parent.width - 168px;
+                                                    y: 0px;
+                                                    width: 42px;
+                                                    height: 100%;
+                                                    text: app.share;
+                                                    font-size: Theme.micro-size;
+                                                    color: Theme.text-tertiary;
+                                                    horizontal-alignment: right;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+
+                                                Text {
+                                                    x: parent.width - 120px;
                                                     y: 0px;
                                                     width: 58px;
                                                     height: 100%;
@@ -852,6 +1149,29 @@ export component AppWindow inherits Window {
                                                     horizontal-alignment: right;
                                                     vertical-alignment: center;
                                                     overflow: elide;
+                                                }
+
+                                                Rectangle {
+                                                    x: parent.width - 30px;
+                                                    y: 12px;
+                                                    width: 24px;
+                                                    height: 24px;
+                                                    border-radius: 12px;
+                                                    background: edit-touch.has-hover ? Theme.hover : Theme.surface-muted;
+                                                    Text {
+                                                        text: "...";
+                                                        width: 100%;
+                                                        height: 100%;
+                                                        font-size: 14px;
+                                                        letter-spacing: 1px;
+                                                        color: Theme.text-tertiary;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    edit-touch := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => { root.edit-app(app.app-id); }
+                                                    }
                                                 }
                                             }
                                     }
@@ -893,7 +1213,31 @@ export component AppWindow inherits Window {
 
                                     Rectangle { height: 20px; background: transparent; }
 
-                                    Rectangle {
+                                    if (root.totals-only) : Rectangle {
+                                        height: 116px;
+                                        border-radius: 8px;
+                                        background: Theme.surface-muted;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: 5px;
+                                            Text {
+                                                text: "Totals only";
+                                                font-size: Theme.body-size;
+                                                font-weight: 600;
+                                                color: Theme.text-secondary;
+                                                horizontal-alignment: center;
+                                            }
+                                            Text {
+                                                text: "Raw intervals for this day were removed by retention.";
+                                                font-size: Theme.micro-size;
+                                                color: Theme.text-tertiary;
+                                                horizontal-alignment: center;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+
+                                    if (!root.totals-only) : Rectangle {
                                         height: 116px;
                                         background: transparent;
                                         HorizontalLayout {
@@ -915,12 +1259,13 @@ export component AppWindow inherits Window {
                                         }
                                     }
 
-                                    Rectangle {
+                                    if (!root.totals-only) : Rectangle {
                                         height: 1px;
                                         background: Theme.line;
                                     }
-                                    Rectangle { height: 8px; background: transparent; }
-                                    hour-axis := Rectangle {
+                                    if (!root.totals-only) : Rectangle { height: 8px; background: transparent; }
+                                    if (!root.totals-only) : Rectangle {
+                                        hour-axis := Rectangle {
                                         height: 14px;
                                         background: transparent;
                                         property <length> slot: (self.width - 69px) / 24;
@@ -974,8 +1319,68 @@ export component AppWindow inherits Window {
                                             vertical-alignment: center;
                                         }
                                     }
+                                    }
                                     Rectangle { vertical-stretch: 1; background: transparent; }
                                 }
+                            }
+                            if (root.site-names-enabled) : VerticalLayout {
+                                Rectangle { height: 24px; background: transparent; }
+                                HorizontalLayout {
+                                    Text {
+                                        text: "Sites";
+                                        font-size: Theme.body-size;
+                                        font-weight: 600;
+                                        color: Theme.text;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text {
+                                        text: "Domains only · local browser history";
+                                        font-size: Theme.micro-size;
+                                        color: Theme.text-tertiary;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Rectangle { height: 8px; background: transparent; }
+                                if (root.sites.length == 0) : Text {
+                                    text: "No site data yet. Browser history is read only while site names are on.";
+                                    font-size: Theme.small-size;
+                                    color: Theme.text-tertiary;
+                                    wrap: word-wrap;
+                                }
+                                for site in root.sites:
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Text {
+                                            width: 160px;
+                                            text: site.domain;
+                                            font-size: Theme.small-size;
+                                            color: Theme.text-secondary;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                            height: 4px;
+                                            border-radius: 2px;
+                                            background: Theme.track;
+                                            Rectangle {
+                                                width: max(3px, parent.width * site.ratio);
+                                                height: 100%;
+                                                border-radius: 2px;
+                                                background: Theme.accent;
+                                                opacity: 0.7;
+                                            }
+                                        }
+                                        Text {
+                                            width: 60px;
+                                            text: site.duration;
+                                            font-size: Theme.micro-size;
+                                            color: Theme.text-tertiary;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Rectangle { height: 4px; background: transparent; }
                             }
                         }
 
@@ -1107,6 +1512,150 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        if (root.view == 2) : VerticalLayout {
+                            // ---- Rhythm view ----
+                            Text {
+                                text: "RHYTHM";
+                                font-size: Theme.micro-size;
+                                font-weight: 600;
+                                color: Theme.text-secondary;
+                                letter-spacing: 1.1px;
+                            }
+                            Rectangle { height: 6px; background: transparent; }
+                            if (root.has-heatmap) : Text {
+                                text: root.heatmap-total;
+                                font-size: Theme.hero-secondary-size;
+                                font-weight: 600;
+                                color: Theme.text;
+                                letter-spacing: -1.1px;
+                                height: 60px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.week-label + ", hour by hour. Each row is a day; darker means more time.";
+                                font-size: Theme.body-size;
+                                color: Theme.text-secondary;
+                            }
+                            Rectangle { height: 28px; background: transparent; }
+
+                            if (!root.has-heatmap) : VerticalLayout {
+                                VerticalLayout {
+                                    alignment: center;
+                                    padding-top: 40px;
+                                    spacing: 10px;
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        EmptyMark { }
+                                    }
+                                    Text {
+                                        text: "No rhythm yet";
+                                        font-size: 16px;
+                                        font-weight: 600;
+                                        color: Theme.text;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Days you use your computer will collect here.";
+                                        font-size: Theme.body-size;
+                                        color: Theme.text-secondary;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+
+                            if (root.has-heatmap) : VerticalLayout {
+                                // Hour labels align with the 24 columns below.
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Rectangle { width: 84px; background: transparent; }
+                                    HorizontalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 2px;
+                                        for hour in 24:
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                height: 14px;
+                                                background: transparent;
+                                                Text {
+                                                    text: hour == 0 ? "12 AM" : hour == 6 ? "6 AM" : hour == 12 ? "12 PM" : hour == 18 ? "6 PM" : "";
+                                                    font-size: Theme.micro-size;
+                                                    color: Theme.text-tertiary;
+                                                    horizontal-alignment: left;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                    }
+                                    Rectangle { width: 60px; background: transparent; }
+                                }
+                                Rectangle { height: 6px; background: transparent; }
+
+                                for row in root.heatmap:
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            width: 84px;
+                                            text: row.label;
+                                            font-size: Theme.small-size;
+                                            color: Theme.text-secondary;
+                                            vertical-alignment: center;
+                                        }
+                                        HorizontalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 2px;
+                                            for cell in row.cells:
+                                                Rectangle {
+                                                    horizontal-stretch: 1;
+                                                    height: 20px;
+                                                    border-radius: 3px;
+                                                    background: cell.ratio > 0.001 ? Theme.accent : Theme.surface-muted;
+                                                    opacity: cell.ratio > 0.001 ? 0.14 + 0.86 * cell.ratio : 0.55;
+                                                }
+                                        }
+                                        Text {
+                                            width: 60px;
+                                            text: row.total;
+                                            font-size: Theme.micro-size;
+                                            color: Theme.text-tertiary;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Rectangle { height: 3px; background: transparent; }
+
+                                Rectangle { height: 16px; background: transparent; }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: "Less";
+                                        font-size: Theme.micro-size;
+                                        color: Theme.text-tertiary;
+                                        vertical-alignment: center;
+                                    }
+                                    for shade in [0.14, 0.35, 0.6, 1.0]:
+                                        Rectangle {
+                                            width: 18px;
+                                            height: 10px;
+                                            border-radius: 2px;
+                                            background: Theme.accent;
+                                            opacity: shade;
+                                        }
+                                    Text {
+                                        text: "More";
+                                        font-size: Theme.micro-size;
+                                        color: Theme.text-tertiary;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                                    Text {
+                                        text: "Rows are days, columns are hours.";
+                                        font-size: Theme.micro-size;
+                                        color: Theme.text-tertiary;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
                         // ---- Quiet footer -----------------------------------
                         VerticalLayout {
                             Rectangle { height: 30px; background: transparent; }
@@ -1139,6 +1688,124 @@ export component AppWindow inherits Window {
                 }
             }
         }
+
+    // ---- Application editor ---------------------------------------------
+    if (root.app-editor-open) : Rectangle {
+        background: transparent;
+        Rectangle {
+            background: Theme.overlay;
+            TouchArea { clicked => { key-root.focus(); root.close-app-editor(); } }
+        }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 440px;
+            height: 326px;
+            border-radius: Theme.radius-lg;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.line;
+
+            VerticalLayout {
+                padding: 22px;
+                spacing: 10px;
+                HorizontalLayout {
+                    Text {
+                        text: "Edit application";
+                        font-size: 18px;
+                        font-weight: 600;
+                        color: Theme.text;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    TextButton {
+                        label: "Close";
+                        tint: Theme.text-secondary;
+                        clicked => { root.close-app-editor(); }
+                    }
+                }
+                Text {
+                    text: "Recorded as " + root.app-editor-name;
+                    font-size: Theme.small-size;
+                    color: Theme.text-secondary;
+                    overflow: elide;
+                }
+                Rectangle { height: 4px; background: transparent; }
+                Text {
+                    text: "Display name";
+                    font-size: Theme.micro-size;
+                    color: Theme.text-secondary;
+                }
+                Rectangle {
+                    height: 36px;
+                    border-radius: 8px;
+                    background: Theme.surface-muted;
+                    border-width: 1px;
+                    border-color: alias-field.has-focus ? Theme.accent : Theme.line;
+                    Text {
+                        x: 12px;
+                        y: 0px;
+                        width: parent.width - 24px;
+                        height: parent.height;
+                        text: "Use the recorded name";
+                        font-size: Theme.body-size;
+                        color: Theme.text-tertiary;
+                        vertical-alignment: center;
+                        visible: root.app-editor-alias == "";
+                    }
+                    alias-field := TextInput {
+                        x: 12px;
+                        y: 0px;
+                        width: parent.width - 24px;
+                        height: parent.height;
+                        text: root.app-editor-alias;
+                        font-size: Theme.body-size;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        single-line: true;
+                        selection-background-color: Theme.accent-soft;
+                        selection-foreground-color: Theme.accent;
+                        edited => { root.app-editor-alias = self.text; }
+                        accepted => { root.save-app-alias(root.app-editor-alias); }
+                    }
+                }
+                Rectangle { height: 4px; background: transparent; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 1px;
+                        Text {
+                            text: "Ignore this app";
+                            font-size: Theme.body-size;
+                            color: Theme.text;
+                        }
+                        Text {
+                            text: "hide it from the app list and shares";
+                            font-size: Theme.micro-size;
+                            color: Theme.text-tertiary;
+                        }
+                    }
+                    Switch {
+                        checked: root.app-editor-ignored;
+                        toggled(v) => { root.set-app-ignored(v); }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; background: transparent; }
+                HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    TextButton {
+                        label: "Cancel";
+                        tint: Theme.text-secondary;
+                        clicked => { root.close-app-editor(); }
+                    }
+                    PrimaryButton {
+                        label: "Save";
+                        clicked => { root.save-app-alias(root.app-editor-alias); }
+                    }
+                }
+            }
+        }
+    }
 
     if (root.load-error != "") : Rectangle {
         x: 0px;
@@ -1470,6 +2137,52 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle { height: 6px; background: transparent; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 1px;
+                        Text {
+                            text: "Weekly digest";
+                            font-size: Theme.body-size;
+                            color: Theme.text;
+                        }
+                        Text {
+                            text: "one local notification each Monday";
+                            font-size: Theme.micro-size;
+                            color: Theme.text-tertiary;
+                        }
+                    }
+                    Switch {
+                        checked: root.digest-enabled;
+                        toggled(v) => { root.set-digest-enabled(v); }
+                    }
+                }
+
+                Rectangle { height: 6px; background: transparent; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 1px;
+                        Text {
+                            text: "Site names (opt-in)";
+                            font-size: Theme.body-size;
+                            color: Theme.text;
+                        }
+                        Text {
+                            text: "read local browser history for domains only";
+                            font-size: Theme.micro-size;
+                            color: Theme.text-tertiary;
+                        }
+                    }
+                    Switch {
+                        checked: root.site-names-enabled;
+                        toggled(v) => { root.set-site-names-enabled(v); }
+                    }
+                }
+
+                Rectangle { height: 6px; background: transparent; }
                 data-row := Rectangle {
                     height: 32px;
                     border-radius: 7px;
@@ -1552,6 +2265,14 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                }
+
+                if (root.update-notice != "") : Text {
+                    text: root.update-notice;
+                    font-size: Theme.micro-size;
+                    color: Theme.accent-text;
+                    wrap: word-wrap;
+                    height: max(18px, self.preferred-height);
                 }
 
                 Hairline { }

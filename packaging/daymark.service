@@ -1,0 +1,16 @@
+[Unit]
+Description=Daymark screen time journal
+Documentation=https://github.com/101xAnshu/daymark
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/daymark --background
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
