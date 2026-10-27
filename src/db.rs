@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// The only values stored in `sessions.presence`. Anything unrecognised falls
 /// back to input so an older or malformed caller cannot break the journal.
@@ -244,6 +244,23 @@ impl Store {
                  COMMIT;",
             )
             .map_err(|e| format!("could not add the app preference columns: {e}"))?;
+        }
+
+        if version < 6 {
+            // Opt-in, domain-only site totals. The table is empty unless the
+            // user enables site names; it never stores URLs or titles.
+            conn.execute_batch(
+                "BEGIN;\n\
+                 CREATE TABLE IF NOT EXISTS domain_totals (\n\
+                   day_start INTEGER NOT NULL,\n\
+                   domain TEXT NOT NULL,\n\
+                   seconds INTEGER NOT NULL,\n\
+                   PRIMARY KEY (day_start, domain)\n\
+                 );\n\
+                 PRAGMA user_version = 6;\n\
+                 COMMIT;",
+            )
+            .map_err(|e| format!("could not create the domain totals schema: {e}"))?;
         }
 
         // A crash can leave one open interval. Its end timestamp is the last
@@ -610,6 +627,61 @@ impl Store {
         Ok(rows)
     }
 
+    /// Replace the domain totals for one day. Called only when the user has
+    /// opted in; the table never contains URLs or titles.
+    pub fn replace_domain_totals(
+        &self,
+        day_start: i64,
+        totals: &[(String, i64)],
+    ) -> Result<(), String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM domain_totals WHERE day_start = ?1",
+            [day_start],
+        )
+        .map_err(|e| e.to_string())?;
+        for (domain, seconds) in totals {
+            if domain.is_empty() || *seconds <= 0 {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO domain_totals(day_start, domain, seconds) VALUES(?1, ?2, ?3)",
+                params![day_start, domain, seconds],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Top domains for one day, largest first.
+    pub fn domain_totals_for_day(&self, day_start: i64) -> Result<Vec<(String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT domain, seconds FROM domain_totals\n\
+                 WHERE day_start = ?1\n\
+                 ORDER BY seconds DESC, domain",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([day_start], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        Ok(rows)
+    }
+
+    /// Remove every stored domain. Called when the user turns site names off.
+    pub fn clear_domain_totals(&self) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM domain_totals", [])
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     /// Raw intervals plus preserved daily totals for a date range. The caller
     /// decides per day which source wins: `day_totals` prefers raw intervals,
     /// so a day still present in both places is never counted twice.
@@ -700,6 +772,7 @@ impl Store {
         self.conn
             .execute_batch(
                 "BEGIN;\n\
+                 DELETE FROM domain_totals;\n\
                  DELETE FROM daily_app_totals;\n\
                  DELETE FROM sessions;\n\
                  DELETE FROM apps;\n\
@@ -834,7 +907,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         assert_eq!(store.get_setting("nope"), None);
         store.set_setting("theme", "dark").unwrap();
         drop(store);
@@ -879,6 +952,40 @@ mod tests {
 
         store.set_app_icon(second, "web-browser").unwrap();
         assert!(store.apps_missing_icons().unwrap().is_empty());
+    }
+
+    #[test]
+    fn domain_totals_replace_and_clear() {
+        let dir = TempDir::new("domains");
+        let store = Store::open_at(&dir.db()).unwrap();
+        let day = Day::today();
+
+        store
+            .replace_domain_totals(
+                day.start_ts(),
+                &[("github.com".into(), 120), ("example.com".into(), 60)],
+            )
+            .unwrap();
+        assert_eq!(
+            store.domain_totals_for_day(day.start_ts()).unwrap(),
+            vec![("github.com".into(), 120), ("example.com".into(), 60)]
+        );
+
+        store
+            .replace_domain_totals(day.start_ts(), &[("github.com".into(), 90)])
+            .unwrap();
+        assert_eq!(
+            store.domain_totals_for_day(day.start_ts()).unwrap(),
+            vec![("github.com".into(), 90)]
+        );
+
+        store.clear_domain_totals().unwrap();
+        assert!(
+            store
+                .domain_totals_for_day(day.start_ts())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -934,7 +1041,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         // Existing rows become input-backed, and neither the session nor the
         // rollup or app identity is rewritten.
         assert_eq!(store.session_presence(1).as_deref(), Some("input"));
@@ -1249,11 +1356,20 @@ mod tests {
             .close_session(session, old_day.start_ts() + 4200)
             .unwrap();
         store.prune_before(today.add_days(-30).start_ts()).unwrap();
+        store
+            .replace_domain_totals(old_day.start_ts(), &[("example.com".into(), 60)])
+            .unwrap();
         store.delete_all().unwrap();
         assert!(!store.has_any_sessions());
         assert!(
             store
                 .daily_app_totals_between(0, i64::MAX)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .domain_totals_for_day(old_day.start_ts())
                 .unwrap()
                 .is_empty()
         );
@@ -1315,7 +1431,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     #[test]
