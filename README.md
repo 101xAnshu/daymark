@@ -100,7 +100,7 @@ Download `daymark_<version>_amd64.deb` for x86_64 or
 `daymark_<version>_arm64.deb` for arm64 from the latest release and install it:
 
 ```bash
-sudo apt install ./daymark_0.1.1_amd64.deb
+sudo apt install ./daymark_0.2.0_amd64.deb
 ```
 
 ### Fedora package
@@ -156,8 +156,8 @@ where a package cannot be used. It contains the release binary and
 `install.sh`. The portable archive is x86_64 only; use a package for arm64:
 
 ```bash
-tar -xzf daymark-0.1.1-x86_64-linux.tar.gz
-cd daymark-0.1.1
+tar -xzf daymark-0.2.0-x86_64-linux.tar.gz
+cd daymark-0.2.0
 ./install.sh --no-build
 ```
 
