@@ -674,6 +674,8 @@ struct Tracker {
     /// The last day the weekly digest was checked, so it runs once a day
     /// without a second timer thread.
     last_digest_check: Option<Day>,
+    /// The last day browser history was scanned for opt-in site names.
+    last_site_scan: Option<Day>,
 }
 
 fn resolve_key(focus: &ExtensionFocus) -> String {
@@ -728,6 +730,7 @@ impl Tracker {
             last_detail: detail,
             presence_capped: false,
             last_digest_check: None,
+            last_site_scan: None,
         }
     }
 
@@ -745,6 +748,23 @@ impl Tracker {
             Ok(true) => self.handle.set_settings(settings),
             Ok(false) => {}
             Err(error) => crate::logging::error("digest", &error),
+        }
+    }
+
+    fn maybe_scan_sites(&mut self, now_wall: i64) {
+        let today = Day::from_timestamp(now_wall);
+        if self.last_site_scan == Some(today) {
+            return;
+        }
+        self.last_site_scan = Some(today);
+        if !self.handle.settings().site_names_enabled {
+            return;
+        }
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            return;
+        };
+        if let Err(error) = crate::sites::scan_and_store(&self.store, &home, today, 14) {
+            crate::logging::error("sites", &error);
         }
     }
 
@@ -978,6 +998,7 @@ impl Tracker {
         }
         let now_wall = date::unix_now();
         self.maybe_digest(now_wall);
+        self.maybe_scan_sites(now_wall);
         let now_mono = Instant::now();
         let mono_delta = now_mono.duration_since(self.last_tick_mono).as_secs() as i64;
         let wall_delta = now_wall - self.last_tick_wall;
@@ -1711,6 +1732,7 @@ mod tests {
             last_detail: String::new(),
             presence_capped: false,
             last_digest_check: Some(Day::today()),
+            last_site_scan: Some(Day::today()),
         }
     }
 

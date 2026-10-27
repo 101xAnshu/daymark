@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, params};
 
+use crate::date::Day;
+use crate::db::Store;
+
 /// A single history visit. The URL stays in memory only long enough to extract
 /// its domain; it is never stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,6 +213,22 @@ pub fn collect_domains(home: &Path, start: i64, end: i64) -> Vec<(String, i64)> 
     domain_seconds(&visits, start, end)
 }
 
+/// Scan `days` days ending at `today` and replace the stored domain totals for
+/// each one. Only called while the user has site names enabled. A day with no
+/// visits is cleared, so turning history off or deleting a browser profile
+/// cannot leave stale domains behind.
+pub fn scan_and_store(store: &Store, home: &Path, today: Day, days: i64) -> Result<usize, String> {
+    let days = days.clamp(1, 31);
+    let mut updated = 0;
+    for offset in (0..days).rev() {
+        let day = today.add_days(-offset as i32);
+        let totals = collect_domains(home, day.start_ts(), day.end_ts());
+        store.replace_domain_totals(day.start_ts(), &totals)?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,5 +417,35 @@ mod tests {
         let domains = collect_domains(&home.0, 0, 2_000);
         assert!(domains.iter().any(|(domain, _)| domain == "github.com"));
         assert!(domains.iter().any(|(domain, _)| domain == "example.com"));
+    }
+
+    #[test]
+    fn scan_and_store_replaces_the_days_domains() {
+        let home = TempDir::new("scan-home");
+        let firefox = home.0.join(".mozilla/firefox/p.default");
+        fs::create_dir_all(&firefox).unwrap();
+        let connection = Connection::open(firefox.join("places.sqlite")).unwrap();
+        let today = Day::today();
+        let micros = (today.start_ts() + 3_600) * 1_000_000;
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT, hidden INTEGER DEFAULT 0);\n\
+                 CREATE TABLE moz_historyvisits (id INTEGER PRIMARY KEY, place_id INTEGER, visit_date INTEGER);\n\
+                 INSERT INTO moz_places(id, url) VALUES(1, 'https://github.com/x');\n\
+                 INSERT INTO moz_historyvisits(place_id, visit_date) VALUES(1, {micros});"
+            ))
+            .unwrap();
+        drop(connection);
+
+        let store = Store::open_at(&home.0.join("daymark.db")).unwrap();
+        let updated = scan_and_store(&store, &home.0, today, 1).unwrap();
+        assert_eq!(updated, 1);
+        assert!(
+            store
+                .domain_totals_for_day(today.start_ts())
+                .unwrap()
+                .iter()
+                .any(|(domain, _)| domain == "github.com")
+        );
     }
 }

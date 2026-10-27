@@ -38,6 +38,12 @@ export struct HeatRow {
     cells: [HeatCell],
 }
 
+export struct SiteRow {
+    domain: string,
+    duration: string,
+    ratio: float,
+}
+
 export struct HistoryRow {
     label: string,
     date: string,
@@ -139,6 +145,8 @@ export component AppWindow inherits Window {
     in property <[HeatRow]> heatmap: [];
     in property <string> heatmap-total: "";
     in property <bool> has-heatmap: false;
+    in property <bool> site-names-enabled: false;
+    in property <[SiteRow]> sites: [];
     in property <string> history-total: "0m";
     in property <string> history-summary: "";
     in property <[HistoryRow]> history: [];
@@ -207,6 +215,7 @@ export component AppWindow inherits Window {
     callback set-theme(int);
     callback set-autostart(bool);
     callback set-digest-enabled(bool);
+    callback set-site-names-enabled(bool);
     callback edit-app(int);
     callback close-app-editor();
     callback save-app-alias(string);
@@ -1314,6 +1323,65 @@ export component AppWindow inherits Window {
                                     Rectangle { vertical-stretch: 1; background: transparent; }
                                 }
                             }
+                            if (root.site-names-enabled) : VerticalLayout {
+                                Rectangle { height: 24px; background: transparent; }
+                                HorizontalLayout {
+                                    Text {
+                                        text: "Sites";
+                                        font-size: Theme.body-size;
+                                        font-weight: 600;
+                                        color: Theme.text;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text {
+                                        text: "Domains only · local browser history";
+                                        font-size: Theme.micro-size;
+                                        color: Theme.text-tertiary;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Rectangle { height: 8px; background: transparent; }
+                                if (root.sites.length == 0) : Text {
+                                    text: "No site data yet. Browser history is read only while site names are on.";
+                                    font-size: Theme.small-size;
+                                    color: Theme.text-tertiary;
+                                    wrap: word-wrap;
+                                }
+                                for site in root.sites:
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Text {
+                                            width: 160px;
+                                            text: site.domain;
+                                            font-size: Theme.small-size;
+                                            color: Theme.text-secondary;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                            height: 4px;
+                                            border-radius: 2px;
+                                            background: Theme.track;
+                                            Rectangle {
+                                                width: max(3px, parent.width * site.ratio);
+                                                height: 100%;
+                                                border-radius: 2px;
+                                                background: Theme.accent;
+                                                opacity: 0.7;
+                                            }
+                                        }
+                                        Text {
+                                            width: 60px;
+                                            text: site.duration;
+                                            font-size: Theme.micro-size;
+                                            color: Theme.text-tertiary;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Rectangle { height: 4px; background: transparent; }
+                            }
                         }
 
                         if (root.view == 1) : VerticalLayout {
@@ -2088,6 +2156,29 @@ export component AppWindow inherits Window {
                     Switch {
                         checked: root.digest-enabled;
                         toggled(v) => { root.set-digest-enabled(v); }
+                    }
+                }
+
+                Rectangle { height: 6px; background: transparent; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 1px;
+                        Text {
+                            text: "Site names (opt-in)";
+                            font-size: Theme.body-size;
+                            color: Theme.text;
+                        }
+                        Text {
+                            text: "read local browser history for domains only";
+                            font-size: Theme.micro-size;
+                            color: Theme.text-tertiary;
+                        }
+                    }
+                    Switch {
+                        checked: root.site-names-enabled;
+                        toggled(v) => { root.set-site-names-enabled(v); }
                     }
                 }
 

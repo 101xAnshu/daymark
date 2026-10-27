@@ -23,7 +23,7 @@ use crate::settings::{self, Settings, ThemePref};
 use crate::stats::{self, RollupTotal, SessionRow};
 use crate::tracker::{self, LiveState, Presence, TrackerHandle, TrackingStatus};
 use crate::{
-    AppRow, AppWindow, DayBar, HeatCell, HeatRow, HistoryRow, HourBar, MetricRow, Theme,
+    AppRow, AppWindow, DayBar, HeatCell, HeatRow, HistoryRow, HourBar, MetricRow, SiteRow, Theme,
     TimelineSegment,
 };
 
@@ -412,6 +412,8 @@ impl AppController {
         self.ui.set_theme_pref(self.settings.theme.index());
         self.ui.set_autostart(self.settings.autostart);
         self.ui.set_digest_enabled(self.settings.digest_enabled);
+        self.ui
+            .set_site_names_enabled(self.settings.site_names_enabled);
         self.ui.set_update_notice(self.update_notice.clone().into());
         self.ui
             .set_settings_error(self.settings_error.clone().into());
@@ -467,6 +469,8 @@ impl AppController {
                 .set_heatmap(ModelRc::new(VecModel::from(Vec::<HeatRow>::new())));
             self.ui.set_heatmap_total("".into());
             self.ui.set_has_heatmap(false);
+            self.ui
+                .set_sites(ModelRc::new(VecModel::from(Vec::<SiteRow>::new())));
             self.ui.set_presence_note("".into());
             self.ui
                 .set_history(ModelRc::new(VecModel::from(Vec::<HistoryRow>::new())));
@@ -819,6 +823,30 @@ impl AppController {
             .into(),
         );
         self.ui.set_apps(ModelRc::new(VecModel::from(app_rows)));
+
+        let site_rows: Vec<SiteRow> = if self.settings.site_names_enabled {
+            let totals = store
+                .domain_totals_for_day(day.start_ts())
+                .unwrap_or_default();
+            let max = totals
+                .iter()
+                .map(|(_, seconds)| *seconds)
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            totals
+                .into_iter()
+                .take(5)
+                .map(|(domain, seconds)| SiteRow {
+                    domain: domain.into(),
+                    duration: date::format_duration(seconds).into(),
+                    ratio: (seconds as f32 / max as f32).clamp(0.0, 1.0),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.ui.set_sites(ModelRc::new(VecModel::from(site_rows)));
 
         let hours: Vec<HourBar> = if totals_only {
             Vec::new()
@@ -1269,6 +1297,53 @@ impl AppController {
                                 Err(error) => logging::error("digest", &error),
                             }
                         }
+                    }
+                    ctl.save_settings();
+                    ctl.force_refresh = true;
+                    ctl.refresh();
+                });
+        }
+        {
+            let c = controller.clone();
+            controller
+                .borrow()
+                .ui
+                .on_set_site_names_enabled(move |enabled| {
+                    let mut ctl = c.borrow_mut();
+                    ctl.settings.site_names_enabled = enabled;
+                    let mut error_message = None;
+                    if let Some(store) = &ctl.store {
+                        if enabled {
+                            match std::env::var_os("HOME").map(PathBuf::from) {
+                                Some(home) => {
+                                    match crate::sites::scan_and_store(
+                                        store,
+                                        &home,
+                                        Day::today(),
+                                        14,
+                                    ) {
+                                        Ok(_) => {}
+                                        Err(error) => {
+                                            logging::error("sites", &error);
+                                            error_message = Some(format!(
+                                                "Could not read browser history: {error}"
+                                            ));
+                                        }
+                                    }
+                                }
+                                None => {
+                                    error_message =
+                                        Some("Could not find the home folder.".to_string());
+                                }
+                            }
+                        } else if let Err(error) = store.clear_domain_totals() {
+                            logging::error("sites", &error);
+                        }
+                    }
+                    if let Some(error) = error_message {
+                        ctl.settings_error = error;
+                    } else {
+                        ctl.settings_error.clear();
                     }
                     ctl.save_settings();
                     ctl.force_refresh = true;

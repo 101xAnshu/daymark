@@ -119,6 +119,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = store.set_app_alias(id, Some("Research browser"));
             }
         }
+        if state == "sites" {
+            let _ = store.replace_domain_totals(
+                Day::today().start_ts(),
+                &[
+                    ("github.com".into(), 2 * 3600),
+                    ("example.com".into(), 3600),
+                    ("docs.rs".into(), 1800),
+                ],
+            );
+        }
         if state == "totals" || state == "history-rollup" {
             // Simulate retention: older days keep their daily totals only.
             let _ = store.prune_before(Day::today().add_days(-5).start_ts());
@@ -126,6 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut settings = Settings {
         autostart: true,
+        site_names_enabled: state == "sites",
         ..Settings::default()
     };
     let status = TrackingStatus::Active;
