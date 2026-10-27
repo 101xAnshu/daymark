@@ -21,7 +21,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-aa5431?style=flat-square" alt="MIT licensed" />
   <img src="https://img.shields.io/badge/GNOME-46--50-aa5431?style=flat-square" alt="GNOME 46 to 50" />
-  <img src="https://img.shields.io/badge/binary-10.0%20MiB-aa5431?style=flat-square" alt="10.0 MB stripped binary" />
+  <img src="https://img.shields.io/badge/binary-10.3%20MiB-aa5431?style=flat-square" alt="10.3 MB stripped binary" />
   <img src="https://img.shields.io/badge/network-none-aa5431?style=flat-square" alt="No network access" />
 </p>
 
@@ -41,7 +41,7 @@ went, and how that compares with your own history. It asks for no account, opens
 no browser engine, makes no network requests, and keeps everything in one small
 SQLite file on the machine in front of you.
 
-The window is a real native app: 10.0 MiB on disk. Started at login with
+The window is a real native app: 10.3 MiB on disk. Started at login with
 `--background`, it opens no window and creates no Slint platform or event loop:
 about 8 MB of memory, 0% idle CPU, and no timed polling while the companion is
 quiet. The tracker waits on an inotify watch and wakes when the companion
@@ -449,7 +449,7 @@ and falls back to the two-second poll if the watch cannot be created.
   desktop entry and the companion reports `daymark.desktop` instead of an
   "Unknown" window-backed app.
 - `--background` created no window and no Slint event loop. A 60-second run of
-  `scripts/measure.sh` with temporary XDG directories measured **8.3–9.0 MiB RSS,
+  `scripts/measure.sh` with temporary XDG directories measured **6.7–8.2 MiB RSS,
   0.00% CPU, 0.03 wakeups/s and 3 threads**; the single periodic wake is the
   30-second watch safety check. A second launch shows the running instance;
   `--quit` stops it cleanly.
@@ -484,10 +484,10 @@ the interface exists, and the headless rows never start it.
 
 | Item | Result |
 | --- | ---: |
-| Stripped executable | **10,531,760 bytes (10.04 MiB)** |
-| Installed application files (binary, icon, entries, extension) | ≈ 10.1 MB |
+| Stripped executable | **10,745,392 bytes (10.25 MiB)** |
+| Installed application files (binary, icon, entries, extension) | ≈ 10.3 MB |
 | Fresh database | 4 KB |
-| Headless RSS (`--background`) | 8.3–9.0 MiB across runs (≈ 8 MB) |
+| Headless RSS (`--background`) | 6.7–8.2 MiB across runs (≈ 8 MB) |
 | Headless CPU, 60 s sample | 0.00% |
 | Headless wakeups | 0.03/s (the 30-second safety check) |
 | Visible RSS | ≈ 23.8 MB |

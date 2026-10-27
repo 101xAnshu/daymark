@@ -84,7 +84,7 @@ The product should be reliable, private, native, and easy to install and keep ru
 
 Daymark already does the core job well. It works on stock GNOME 45 to 50, on Wayland and
 Xorg. It stores no window titles, browser history, or URLs, and it contains no network
-code. It ships as one 10.0 MiB native binary with no WebView and no WebKitGTK or GTK
+code. It ships as one 10.3 MiB native binary with no WebView and no WebKitGTK or GTK
 runtime. The headless process uses about 8 MB, and the background mode creates no window
 or event loop until the interface is requested.
 
@@ -125,7 +125,7 @@ The scorecard records the state before V1. The implemented result is in Current 
 | Install path | `git clone` and `install.sh` | A .deb for Ubuntu and an .rpm for Fedora from GitHub Releases, no build step | P0 |
 | Package quality | None yet | Small .deb and .rpm with a working first run | P0 |
 | Privacy model | No titles, URLs, history, or network | Keep, and keep site data opt-in and domain-only | Keep |
-| Footprint | 10.0 MiB binary, about 8 MB headless, about 24 MB open | Measure both hidden states and keep the native build | Keep |
+| Footprint | 10.3 MiB binary, about 8 MB headless, about 24 MB open | Measure both hidden states and keep the native build | Keep |
 | Capture accuracy | 2 second polling, no noise floor | Event-driven with a 30 second fallback and a 5 second merge | P1 |
 | Idle, lock, suspend | Exact input-stop timestamp and GNOME signals | Keep, and add a presence flag and a cap | Keep and P1 |
 | Pause | Saved boolean with no timed pause | 15 minutes, 1 hour, or until resumed, with a safe resume | P0 |
@@ -274,7 +274,7 @@ README publishes headless and hidden-after-close numbers.
   and Fedora 42 (GNOME 48).
 - The privacy model. No window titles, no browser files, no URLs, and no network code.
 - The native UI. Slint with no WebView, no WebKitGTK or GTK runtime, and AccessKit roles.
-- The single binary. 10.0 MiB, no Node, no Chromium tree, and a simple package.
+- The single binary. 10.3 MiB, no Node, no Chromium tree, and a simple package.
 - Crash and corruption behavior. The 30 second heartbeat, the one-open-row rule, the
   corrupt database quarantine, and monotonic duration accounting.
 - GNOME identity handling. Shell app id, Shell surface filtering, legacy row merge, icon
