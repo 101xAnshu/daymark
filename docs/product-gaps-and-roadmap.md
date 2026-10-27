@@ -28,7 +28,7 @@ The product should be reliable, private, native, and easy to install and keep ru
 ## V2 progress
 
 - The Rhythm view is implemented on `v2`: a 7×24 heatmap for the last seven days,
-  with hour labels, per-day totals, and a legend. The library has **128 tests**, plus
+  with hour labels, per-day totals, and a legend. The library has **133 tests**, plus
   **8 tray tests** in the binary crate.
 - The Day view now has a metrics row and a 24-hour timeline on `v2`. The metrics row
   reports the longest uninterrupted stretch, distinct apps, time after midnight
@@ -60,6 +60,11 @@ The product should be reliable, private, native, and easy to install and keep ru
   `apt-cache policy` parsing with numeric version comparison, no network, and a quiet
   Settings notice when a newer candidate exists. There is no APT repository to report
   against yet.
+- App aliases, ignore flags and the icon-backfill store query are implemented on `v2`.
+  The alias/ignore/share UI and the startup icon backfill are still pending.
+- Privacy-safe domain extraction is implemented on `v2`: http(s) host only, no paths,
+  queries, titles or full URLs, and localhost/IP literals are rejected. The browser
+  history reader and the opt-in site-names UI are still pending.
 - The tray is implemented on `v2`: a small StatusNotifierItem menu offers Open
   Daymark, Pause 15 minutes, Pause 1 hour, Pause until resumed, Resume while
   paused, and Quit Daymark. It drives the existing local socket command path,
@@ -74,7 +79,7 @@ The product should be reliable, private, native, and easy to install and keep ru
 
 Daymark already does the core job well. It works on stock GNOME 45 to 50, on Wayland and
 Xorg. It stores no window titles, browser history, or URLs, and it contains no network
-code. It ships as one 8.8 MiB native binary with no WebView and no WebKitGTK or GTK
+code. It ships as one 10.0 MiB native binary with no WebView and no WebKitGTK or GTK
 runtime. The headless process uses about 8 MB, and the background mode creates no window
 or event loop until the interface is requested.
 
@@ -115,7 +120,7 @@ The scorecard records the state before V1. The implemented result is in Current 
 | Install path | `git clone` and `install.sh` | A .deb for Ubuntu and an .rpm for Fedora from GitHub Releases, no build step | P0 |
 | Package quality | None yet | Small .deb and .rpm with a working first run | P0 |
 | Privacy model | No titles, URLs, history, or network | Keep, and keep site data opt-in and domain-only | Keep |
-| Footprint | 8.8 MiB binary, about 8 MB headless, about 24 MB open | Measure both hidden states and keep the native build | Keep |
+| Footprint | 10.0 MiB binary, about 8 MB headless, about 24 MB open | Measure both hidden states and keep the native build | Keep |
 | Capture accuracy | 2 second polling, no noise floor | Event-driven with a 30 second fallback and a 5 second merge | P1 |
 | Idle, lock, suspend | Exact input-stop timestamp and GNOME signals | Keep, and add a presence flag and a cap | Keep and P1 |
 | Pause | Saved boolean with no timed pause | 15 minutes, 1 hour, or until resumed, with a safe resume | P0 |
@@ -237,7 +242,7 @@ sessions into another day. A domain rollup would follow only if domains are adde
 
 ### Tests and measurement
 
-The tree now has 128 library tests and 8 tray tests covering date handling, storage,
+The tree now has 133 library tests and 8 tray tests covering date handling, storage,
 recovery, migration, pruning, daily rollup preservation and raw/rollup merging (raw
 intervals win, totals-only days, old empty days), settings, single instance, tracker
 behavior, the inotify watch
@@ -246,7 +251,8 @@ the first-run decision, autostart consent, seven-day hourly heatmap aggregation,
 metrics and timeline segmentation across midnight and idle gaps, idle_ms parsing, the
 two-hour presence boundary, input return, lock and idle precedence, presence persistence
 and the v3 to v4 migration, weekly digest delivery and once-a-day gating, local APT
-policy/status parsing, read-only doctor/status output, pause command encoding, and tray
+policy/status parsing, app alias/ignore storage and the icon-backfill query, domain
+extraction, read-only doctor/status output, pause command encoding, and tray
 menu, icon and pause-state mapping. Some tracker tests still
 use real sleeps and wall time.
 
@@ -262,7 +268,7 @@ README publishes headless and hidden-after-close numbers.
   and Fedora 42 (GNOME 48).
 - The privacy model. No window titles, no browser files, no URLs, and no network code.
 - The native UI. Slint with no WebView, no WebKitGTK or GTK runtime, and AccessKit roles.
-- The single binary. 8.8 MiB, no Node, no Chromium tree, and a simple package.
+- The single binary. 10.0 MiB, no Node, no Chromium tree, and a simple package.
 - Crash and corruption behavior. The 30 second heartbeat, the one-open-row rule, the
   corrupt database quarantine, and monotonic duration accounting.
 - GNOME identity handling. Shell app id, Shell surface filtering, legacy row merge, icon
@@ -426,7 +432,7 @@ These choices are fixed for V1.
   inhibitors, and session-bus MPRIS playback.
 - `ui/app.slint` holds the day metrics row, 24-hour timeline, presence note, week, hourly,
   history, search, settings, first-run, and banner views.
-- The current tree has 128 library tests and 8 tray tests, CI, amd64 and arm64 `.deb`
+- The current tree has 133 library tests and 8 tray tests, CI, amd64 and arm64 `.deb`
   packaging, x86_64 and aarch64 `.rpm` packaging, `doctor`, timed pause, the first-run
   flow, the noise floor, the Rhythm
   heatmap, the inotify watch, the day metrics and timeline, the audio/inhibitor presence

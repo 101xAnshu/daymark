@@ -21,7 +21,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-aa5431?style=flat-square" alt="MIT licensed" />
   <img src="https://img.shields.io/badge/GNOME-46--50-aa5431?style=flat-square" alt="GNOME 46 to 50" />
-  <img src="https://img.shields.io/badge/binary-8.8%20MiB-aa5431?style=flat-square" alt="8.8 MB stripped binary" />
+  <img src="https://img.shields.io/badge/binary-10.0%20MiB-aa5431?style=flat-square" alt="10.0 MB stripped binary" />
   <img src="https://img.shields.io/badge/network-none-aa5431?style=flat-square" alt="No network access" />
 </p>
 
@@ -41,7 +41,7 @@ went, and how that compares with your own history. It asks for no account, opens
 no browser engine, makes no network requests, and keeps everything in one small
 SQLite file on the machine in front of you.
 
-The window is a real native app: 8.8 MiB on disk. Started at login with
+The window is a real native app: 10.0 MiB on disk. Started at login with
 `--background`, it opens no window and creates no Slint platform or event loop:
 about 8 MB of memory, 0% idle CPU, and no timed polling while the companion is
 quiet. The tracker waits on an inotify watch and wakes when the companion
@@ -122,10 +122,11 @@ Remove one with `sudo apt remove daymark` or `sudo dnf remove daymark`;
 recorded history is kept in your home directory.
 
 The tray icon uses the desktop's StatusNotifierItem/AppIndicator host. Ubuntu
-ships that host by default. Fedora may need the
-`gnome-shell-extension-appindicator` package; the packages recommend it but do
-not require it. Without a host, Daymark runs normally and simply has no tray
-icon.
+ships a host by default (the package is `gnome-shell-extension-appindicator` on
+24.04 and `gnome-shell-ubuntu-extensions` on newer releases). Fedora may need
+the `gnome-shell-extension-appindicator` package; the packages recommend a host
+but do not require it. Without a host, Daymark runs normally and simply has no
+tray icon.
 
 The package scripts default to the host architecture. Pass `--arch arm64` to
 `scripts/build-deb.sh` or `--arch aarch64` to `scripts/build-rpm.sh` for the
@@ -388,7 +389,7 @@ and falls back to the two-second poll if the watch cannot be created.
 
 ## Verification
 
-- `cargo test --lib`: **128 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **133 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
   across midnight, idle-gap exclusion, per-app totals, day metrics and timeline
   segmentation (empty days, gaps, overlaps, after-midnight and cross-midnight
@@ -412,8 +413,9 @@ and falls back to the two-second poll if the watch cannot be created.
   latch, and lock/idle precedence), session presence persistence and the schema
   v4 migration, the weekly digest computation, notification payload and
   preference round-trip, digest delivery and once-a-day gating, local APT
-  policy/status parsing with numeric version comparison, and the pause
-  command encoding and socket-line mapping.
+  policy/status parsing with numeric version comparison, app alias and ignore
+  storage with the icon-backfill query, privacy-safe domain extraction, and the
+  pause command encoding and socket-line mapping.
 - `cargo test --bin daymark`: **8 passed** — tray menu order and the
   paused-only Resume item, pause preset to seconds and socket command mapping,
   expired-pause display, the minute poll key, tooltip text, and the distinct
@@ -460,12 +462,14 @@ and falls back to the two-second poll if the watch cannot be created.
 
 Measured on Ubuntu 26.04, GNOME Shell 50.1, Wayland, x86_64, release build.
 The headless rows are from the watch build; the visible and hidden rows were
-sampled before it, so their tracker poll is now event-driven.
+sampled before it, so their tracker poll is now event-driven. The visible and
+hidden rows also predate the tray; the tray adds a small D-Bus client only while
+the interface exists, and the headless rows never start it.
 
 | Item | Result |
 | --- | ---: |
-| Stripped executable | **9,242,736 bytes (8.81 MiB)** |
-| Installed application files (binary, icon, entries, extension) | ≈ 9.3 MB |
+| Stripped executable | **10,531,760 bytes (10.04 MiB)** |
+| Installed application files (binary, icon, entries, extension) | ≈ 10.1 MB |
 | Fresh database | 4 KB |
 | Headless RSS (`--background`) | 8.3–9.0 MiB across runs (≈ 8 MB) |
 | Headless CPU, 60 s sample | 0.00% |
