@@ -109,6 +109,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = store.set_app_alias(id, Some("Research browser"));
             }
         }
+        if state == "ignored" || state == "ignored-shown" || state == "editor" {
+            if let Some(id) = demo_app_id(&store, "org.gnome.Ptyxis.desktop") {
+                let _ = store.set_app_ignored(id, true);
+            }
+        }
+        if state == "editor" {
+            if let Some(id) = demo_app_id(&store, "brave-browser.desktop") {
+                let _ = store.set_app_alias(id, Some("Research browser"));
+            }
+        }
         if state == "totals" || state == "history-rollup" {
             // Simulate retention: older days keep their daily totals only.
             let _ = store.prune_before(Day::today().add_days(-5).start_ts());
@@ -172,6 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }))
     .ok();
 
+    let editor_app = demo_app_id(&store, "brave-browser.desktop");
     let ui = AppWindow::new()?;
     let controller = AppController::new(ui, Some(store), Some(tracker), settings, None);
     {
@@ -181,6 +192,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "rhythm" => ctl.set_view_for_render(2),
             "light-rhythm" => ctl.set_view_for_render(2),
             "rhythm-empty" => ctl.set_view_for_render(2),
+            "ignored" => {}
+            "ignored-shown" => ctl.show_ignored_for_render(true),
+            "editor" => {
+                if let Some(id) = editor_app {
+                    ctl.edit_app_for_render(id);
+                }
+            }
             "timeline" => {}
             "timeline-empty" => ctl.set_selected_for_render(-9),
             "now" => {}

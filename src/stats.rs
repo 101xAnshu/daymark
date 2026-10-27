@@ -828,4 +828,38 @@ mod tests {
         assert_eq!(week_delta_with_rollups(&[], &rollups, day), Some(15 * 60));
         assert_eq!(week_delta_with_rollups(&[], &[], day), None);
     }
+
+    #[test]
+    fn share_labels_are_quiet_and_bounded() {
+        assert_eq!(share_label(0, 100), "");
+        assert_eq!(share_label(100, 0), "");
+        assert_eq!(share_label(100, 100), "100%");
+        assert_eq!(share_label(1, 1_000), "<1%");
+        assert_eq!(share_label(250, 1_000), "25%");
+        assert_eq!(share_fraction(1_500, 1_000), 1.0);
+    }
+
+    #[test]
+    fn visible_apps_hide_ignored_rows_but_keep_the_day_total() {
+        let day = Day::today();
+        let rows = [
+            SessionRow {
+                app_id: 1,
+                started: at(day, 9, 0),
+                ended: at(day, 10, 0),
+            },
+            SessionRow {
+                app_id: 2,
+                started: at(day, 10, 0),
+                ended: at(day, 10, 30),
+            },
+        ];
+        let ignored = std::collections::HashSet::from([1]);
+        let (total, apps) = visible_day_apps(&rows, &[], day, &ignored);
+        assert_eq!(total, 90 * 60);
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].app_id, 2);
+        assert_eq!(apps[0].seconds, 30 * 60);
+        assert!((apps[0].share - 1.0 / 3.0).abs() < 0.001);
+    }
 }
