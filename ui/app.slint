@@ -2,13 +2,16 @@ export { Theme } from "theme.slint";
 import { Theme, Hairline, SlidersIcon, CloseIcon, SearchIcon, Chevron, Switch, Chip, TextButton, PrimaryButton, WindowControl, EmptyMark, AppIcon } from "theme.slint";
 
 export struct AppRow {
+    app-id: int,
     name: string,
     duration: string,
+    share: string,
     ratio: float,
     initial: string,
     has-icon: bool,
     icon: image,
     tint: color,
+    ignored: bool,
 }
 
 export struct DayBar {
@@ -172,6 +175,12 @@ export component AppWindow inherits Window {
     in property <int> theme-pref: 0;
     in property <bool> autostart: false;
     in property <bool> digest-enabled: false;
+    in property <int> ignored-app-count: 0;
+    in property <bool> show-ignored: false;
+    in property <bool> app-editor-open: false;
+    in property <string> app-editor-name: "";
+    in-out property <string> app-editor-alias: "";
+    in property <bool> app-editor-ignored: false;
     in property <string> settings-error: "";
     in property <string> app-version: "0.1.1";
     in property <string> update-notice: "";
@@ -198,6 +207,11 @@ export component AppWindow inherits Window {
     callback set-theme(int);
     callback set-autostart(bool);
     callback set-digest-enabled(bool);
+    callback edit-app(int);
+    callback close-app-editor();
+    callback save-app-alias(string);
+    callback set-app-ignored(bool);
+    callback toggle-show-ignored();
     // Pause for the given number of seconds; 0 pauses until resumed.
     callback pause-for(int);
     callback search-changed(string);
@@ -940,6 +954,13 @@ export component AppWindow inherits Window {
                                             vertical-alignment: center;
                                             visible: root.apps-caption != "";
                                         }
+                                        if (root.ignored-app-count > 0) : TextButton {
+                                            label: root.show-ignored
+                                                ? "Hide ignored"
+                                                : "Show ignored (" + root.ignored-app-count + ")";
+                                            tint: Theme.text-tertiary;
+                                            clicked => { root.toggle-show-ignored(); }
+                                        }
                                         Rectangle { horizontal-stretch: 1; }
                                         Rectangle {
                                             visible: root.apps.length > 0 || root.search-text != "";
@@ -1048,6 +1069,7 @@ export component AppWindow inherits Window {
                                                 height: 48px;
                                                 border-radius: 9px;
                                                 background: transparent;
+                                                opacity: app.ignored ? 0.55 : 1.0;
 
                                                 AppIcon {
                                                     x: 6px;
@@ -1061,7 +1083,7 @@ export component AppWindow inherits Window {
                                                 Rectangle {
                                                     x: 44px;
                                                     y: 0px;
-                                                    width: parent.width - 110px;
+                                                    width: parent.width - 220px;
                                                     height: 48px;
                                                     background: transparent;
 
@@ -1094,7 +1116,20 @@ export component AppWindow inherits Window {
                                                 }
 
                                                 Text {
-                                                    x: parent.width - 66px;
+                                                    x: parent.width - 168px;
+                                                    y: 0px;
+                                                    width: 42px;
+                                                    height: 100%;
+                                                    text: app.share;
+                                                    font-size: Theme.micro-size;
+                                                    color: Theme.text-tertiary;
+                                                    horizontal-alignment: right;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+
+                                                Text {
+                                                    x: parent.width - 120px;
                                                     y: 0px;
                                                     width: 58px;
                                                     height: 100%;
@@ -1105,6 +1140,29 @@ export component AppWindow inherits Window {
                                                     horizontal-alignment: right;
                                                     vertical-alignment: center;
                                                     overflow: elide;
+                                                }
+
+                                                Rectangle {
+                                                    x: parent.width - 30px;
+                                                    y: 12px;
+                                                    width: 24px;
+                                                    height: 24px;
+                                                    border-radius: 12px;
+                                                    background: edit-touch.has-hover ? Theme.hover : Theme.surface-muted;
+                                                    Text {
+                                                        text: "...";
+                                                        width: 100%;
+                                                        height: 100%;
+                                                        font-size: 14px;
+                                                        letter-spacing: 1px;
+                                                        color: Theme.text-tertiary;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    edit-touch := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => { root.edit-app(app.app-id); }
+                                                    }
                                                 }
                                             }
                                     }
@@ -1562,6 +1620,124 @@ export component AppWindow inherits Window {
                 }
             }
         }
+
+    // ---- Application editor ---------------------------------------------
+    if (root.app-editor-open) : Rectangle {
+        background: transparent;
+        Rectangle {
+            background: Theme.overlay;
+            TouchArea { clicked => { key-root.focus(); root.close-app-editor(); } }
+        }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 440px;
+            height: 326px;
+            border-radius: Theme.radius-lg;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.line;
+
+            VerticalLayout {
+                padding: 22px;
+                spacing: 10px;
+                HorizontalLayout {
+                    Text {
+                        text: "Edit application";
+                        font-size: 18px;
+                        font-weight: 600;
+                        color: Theme.text;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    TextButton {
+                        label: "Close";
+                        tint: Theme.text-secondary;
+                        clicked => { root.close-app-editor(); }
+                    }
+                }
+                Text {
+                    text: "Recorded as " + root.app-editor-name;
+                    font-size: Theme.small-size;
+                    color: Theme.text-secondary;
+                    overflow: elide;
+                }
+                Rectangle { height: 4px; background: transparent; }
+                Text {
+                    text: "Display name";
+                    font-size: Theme.micro-size;
+                    color: Theme.text-secondary;
+                }
+                Rectangle {
+                    height: 36px;
+                    border-radius: 8px;
+                    background: Theme.surface-muted;
+                    border-width: 1px;
+                    border-color: alias-field.has-focus ? Theme.accent : Theme.line;
+                    Text {
+                        x: 12px;
+                        y: 0px;
+                        width: parent.width - 24px;
+                        height: parent.height;
+                        text: "Use the recorded name";
+                        font-size: Theme.body-size;
+                        color: Theme.text-tertiary;
+                        vertical-alignment: center;
+                        visible: root.app-editor-alias == "";
+                    }
+                    alias-field := TextInput {
+                        x: 12px;
+                        y: 0px;
+                        width: parent.width - 24px;
+                        height: parent.height;
+                        text: root.app-editor-alias;
+                        font-size: Theme.body-size;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        single-line: true;
+                        selection-background-color: Theme.accent-soft;
+                        selection-foreground-color: Theme.accent;
+                        edited => { root.app-editor-alias = self.text; }
+                        accepted => { root.save-app-alias(root.app-editor-alias); }
+                    }
+                }
+                Rectangle { height: 4px; background: transparent; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 1px;
+                        Text {
+                            text: "Ignore this app";
+                            font-size: Theme.body-size;
+                            color: Theme.text;
+                        }
+                        Text {
+                            text: "hide it from the app list and shares";
+                            font-size: Theme.micro-size;
+                            color: Theme.text-tertiary;
+                        }
+                    }
+                    Switch {
+                        checked: root.app-editor-ignored;
+                        toggled(v) => { root.set-app-ignored(v); }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; background: transparent; }
+                HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    TextButton {
+                        label: "Cancel";
+                        tint: Theme.text-secondary;
+                        clicked => { root.close-app-editor(); }
+                    }
+                    PrimaryButton {
+                        label: "Save";
+                        clicked => { root.save-app-alias(root.app-editor-alias); }
+                    }
+                }
+            }
+        }
+    }
 
     if (root.load-error != "") : Rectangle {
         x: 0px;

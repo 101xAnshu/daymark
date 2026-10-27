@@ -45,6 +45,63 @@ pub struct DayTotals {
     pub has_rollup: bool,
 }
 
+/// One visible application on the Day list, with its share of the unchanged
+/// day total. Hidden apps have no row and therefore no share.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DayApp {
+    pub app_id: i64,
+    pub seconds: i64,
+    pub share: f32,
+}
+
+/// Fraction of a day total. The total is the whole day, including time from
+/// apps the user has ignored, so share fractions are honest even though their
+/// rows are hidden.
+pub fn share_fraction(seconds: i64, total: i64) -> f32 {
+    if seconds <= 0 || total <= 0 {
+        return 0.0;
+    }
+    (seconds as f64 / total as f64).clamp(0.0, 1.0) as f32
+}
+
+/// A quiet percentage label next to an app's duration. Empty at zero, `<1%`
+/// for a sliver, and a whole percent otherwise.
+pub fn share_label(seconds: i64, total: i64) -> String {
+    if seconds <= 0 || total <= 0 {
+        return String::new();
+    }
+    let percent = share_fraction(seconds, total) * 100.0;
+    if percent > 0.0 && percent < 1.0 {
+        "<1%".into()
+    } else {
+        format!("{}%", percent.round() as i64)
+    }
+}
+
+/// Visible application rows for `day`. Ignored apps are removed from the rows
+/// and from the shares, but the returned total stays the whole recorded day.
+/// Ignoring therefore hides a row without rewriting the day's total, timeline
+/// or hourly chart; the hidden app's time remains in all of them.
+pub fn visible_day_apps(
+    rows: &[SessionRow],
+    rollups: &[RollupTotal],
+    day: Day,
+    ignored: &HashSet<i64>,
+) -> (i64, Vec<DayApp>) {
+    let totals = day_totals(rows, rollups, day);
+    let apps = totals
+        .apps
+        .iter()
+        .filter(|(app_id, seconds)| !ignored.contains(app_id) && *seconds > 0)
+        .map(|(app_id, seconds)| DayApp {
+            app_id: *app_id,
+            seconds: *seconds,
+            share: share_fraction(*seconds, totals.total),
+        })
+        .collect();
+    (totals.total, apps)
+}
+
 impl DayTotals {
     /// A day whose raw intervals aged out. The total and per-app split survive,
     /// but the hour of day does not, so the interface must not invent it.
@@ -770,5 +827,39 @@ mod tests {
         let rollups = [rollup(previous, 1, 20 * 60), rollup(day, 1, 35 * 60)];
         assert_eq!(week_delta_with_rollups(&[], &rollups, day), Some(15 * 60));
         assert_eq!(week_delta_with_rollups(&[], &[], day), None);
+    }
+
+    #[test]
+    fn share_labels_are_quiet_and_bounded() {
+        assert_eq!(share_label(0, 100), "");
+        assert_eq!(share_label(100, 0), "");
+        assert_eq!(share_label(100, 100), "100%");
+        assert_eq!(share_label(1, 1_000), "<1%");
+        assert_eq!(share_label(250, 1_000), "25%");
+        assert_eq!(share_fraction(1_500, 1_000), 1.0);
+    }
+
+    #[test]
+    fn visible_apps_hide_ignored_rows_but_keep_the_day_total() {
+        let day = Day::today();
+        let rows = [
+            SessionRow {
+                app_id: 1,
+                started: at(day, 9, 0),
+                ended: at(day, 10, 0),
+            },
+            SessionRow {
+                app_id: 2,
+                started: at(day, 10, 0),
+                ended: at(day, 10, 30),
+            },
+        ];
+        let ignored = std::collections::HashSet::from([1]);
+        let (total, apps) = visible_day_apps(&rows, &[], day, &ignored);
+        assert_eq!(total, 90 * 60);
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].app_id, 2);
+        assert_eq!(apps[0].seconds, 30 * 60);
+        assert!((apps[0].share - 1.0 / 3.0).abs() < 0.001);
     }
 }

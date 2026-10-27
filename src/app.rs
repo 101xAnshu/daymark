@@ -2,7 +2,7 @@
 //! Slint dashboard consumes, and handles user actions.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -13,6 +13,7 @@ use slint::{ComponentHandle, Image, ModelRc, SharedPixelBuffer, VecModel};
 
 use crate::date::{self, Day};
 use crate::db::{self, AppInfo, Store};
+use crate::desktop::DesktopIndex;
 use crate::instance::{
     COMMAND_NONE, COMMAND_PAUSE, COMMAND_QUIT, COMMAND_RESUME, COMMAND_SHOW, MAX_PAUSE_SECONDS,
     command_kind, pause_seconds,
@@ -203,6 +204,44 @@ fn initial(name: &str) -> String {
         .unwrap_or_else(|| "•".into())
 }
 
+/// A user-chosen alias when present, otherwise the recorded application name.
+/// A blank or whitespace-only alias never hides the real name.
+fn display_name<'a>(alias: Option<&'a str>, name: &'a str) -> &'a str {
+    alias
+        .map(str::trim)
+        .filter(|alias| !alias.is_empty())
+        .unwrap_or(name)
+}
+
+/// One pass over apps whose icon reference is missing. The resolver is kept
+/// separate so the selection and update can be tested without a live desktop
+/// index.
+fn backfill_icons_with(store: &Store, resolve: impl Fn(&AppInfo) -> Option<String>) -> usize {
+    let Ok(apps) = store.apps_missing_icons() else {
+        return 0;
+    };
+    let mut updated = 0;
+    for app in apps {
+        if let Some(icon) = resolve(&app) {
+            if store.set_app_icon(app.id, &icon).is_ok() {
+                updated += 1;
+            }
+        }
+    }
+    updated
+}
+
+/// Resolve missing icons once at startup. The app keeps recording normally if
+/// the desktop index is unavailable.
+fn backfill_icons(store: &Store) {
+    let index = DesktopIndex::load();
+    backfill_icons_with(store, |info| {
+        index
+            .resolve(&info.key, None, Some(info.name.as_str()))
+            .icon
+    });
+}
+
 fn peak_label(hour: u32) -> String {
     let next = (hour + 1) % 24;
     let a = if hour == 0 {
@@ -263,6 +302,11 @@ pub struct AppController {
     last_pause_status: String,
     /// A local APT update notice, empty when no newer candidate exists.
     update_notice: String,
+    /// Reveal ignored apps in the Day list so they can be edited again.
+    show_ignored: bool,
+    editing_app: Option<i64>,
+    editor_alias: String,
+    editor_ignored: bool,
 }
 
 impl AppController {
@@ -297,6 +341,9 @@ impl AppController {
                 )
             })
             .unwrap_or_default();
+        if let Some(store) = &store {
+            backfill_icons(store);
+        }
         let controller = Rc::new(RefCell::new(Self {
             ui,
             store,
@@ -332,6 +379,10 @@ impl AppController {
             pause_remaining: 0,
             last_pause_status: String::new(),
             update_notice,
+            show_ignored: false,
+            editing_app: None,
+            editor_alias: String::new(),
+            editor_ignored: false,
         }));
 
         if let Some(icon) = search_icon() {
@@ -700,16 +751,40 @@ impl AppController {
         );
         self.ui.set_has_heatmap(heatmap_total > 0);
 
-        // Application rows, including the current live interval.
-        let total_apps = day_totals.apps.len();
+        // Application rows, including the current live interval. Ignored apps
+        // lose their row and their share, while the day total keeps every
+        // recorded minute, including the time they contributed.
+        let ignored: HashSet<i64> = app_infos
+            .values()
+            .filter(|info| info.ignored)
+            .map(|info| info.id)
+            .collect();
+        self.ui.set_ignored_app_count(ignored.len() as i32);
+        self.ui.set_show_ignored(self.show_ignored);
+        let (_, visible_apps) = stats::visible_day_apps(&rows, &rollups, day, &ignored);
+        let apps_to_show: Vec<(i64, i64)> = if self.show_ignored {
+            day_totals.apps.clone()
+        } else {
+            visible_apps
+                .iter()
+                .map(|app| (app.app_id, app.seconds))
+                .collect()
+        };
+        let total_apps = apps_to_show.len();
         let query_lower = self.query.to_lowercase();
-        let top = day_totals.apps.first().map(|(_, v)| *v).unwrap_or(1).max(1);
+        let top = apps_to_show
+            .iter()
+            .map(|(_, seconds)| *seconds)
+            .max()
+            .unwrap_or(1)
+            .max(1);
         let mut app_rows = Vec::new();
-        for (app_id, seconds) in &day_totals.apps {
-            let Some(info) = app_infos.get(app_id) else {
+        for (app_id, seconds) in apps_to_show {
+            let Some(info) = app_infos.get(&app_id) else {
                 continue;
             };
-            if !query_lower.is_empty() && !info.name.to_lowercase().contains(&query_lower) {
+            let name = display_name(info.alias.as_deref(), &info.name);
+            if !query_lower.is_empty() && !name.to_lowercase().contains(&query_lower) {
                 continue;
             }
             let tint = app_tint(&info.key, self.dark);
@@ -718,13 +793,16 @@ impl AppController {
                 None => (Image::default(), false),
             };
             app_rows.push(AppRow {
-                name: info.name.clone().into(),
-                duration: date::format_duration(*seconds).into(),
-                ratio: (*seconds as f32 / top as f32).clamp(0.0, 1.0),
-                initial: initial(&info.name).into(),
+                app_id: app_id as i32,
+                name: name.into(),
+                duration: date::format_duration(seconds).into(),
+                share: stats::share_label(seconds, day_totals.total).into(),
+                ratio: (seconds as f32 / top as f32).clamp(0.0, 1.0),
+                initial: initial(name).into(),
                 has_icon,
                 icon,
                 tint,
+                ignored: ignored.contains(&app_id),
             });
         }
         let shown = app_rows.len();
@@ -1199,6 +1277,68 @@ impl AppController {
         }
         {
             let c = controller.clone();
+            controller.borrow().ui.on_edit_app(move |app_id| {
+                let mut ctl = c.borrow_mut();
+                ctl.edit_app(app_id as i64);
+            });
+        }
+        {
+            let c = controller.clone();
+            controller.borrow().ui.on_close_app_editor(move || {
+                let mut ctl = c.borrow_mut();
+                ctl.editing_app = None;
+                ctl.ui.set_app_editor_open(false);
+            });
+        }
+        {
+            let c = controller.clone();
+            controller.borrow().ui.on_set_app_ignored(move |ignored| {
+                let mut ctl = c.borrow_mut();
+                ctl.editor_ignored = ignored;
+                ctl.ui.set_app_editor_ignored(ignored);
+            });
+        }
+        {
+            let c = controller.clone();
+            controller.borrow().ui.on_save_app_alias(move |alias| {
+                let mut ctl = c.borrow_mut();
+                let Some(id) = ctl.editing_app else {
+                    return;
+                };
+                let ignored = ctl.editor_ignored;
+                let mut save_error = None;
+                if let Some(store) = &ctl.store {
+                    let alias = alias.trim();
+                    let alias = if alias.is_empty() { None } else { Some(alias) };
+                    if let Err(error) = store.set_app_alias(id, alias) {
+                        logging::error("alias", &error);
+                        save_error = Some(format!("Could not save the display name: {error}"));
+                    }
+                    if let Err(error) = store.set_app_ignored(id, ignored) {
+                        logging::error("ignore", &error);
+                        save_error = Some(format!("Could not save the ignore rule: {error}"));
+                    }
+                }
+                if let Some(error) = save_error {
+                    ctl.settings_error = error;
+                }
+                ctl.editing_app = None;
+                ctl.ui.set_app_editor_open(false);
+                ctl.force_refresh = true;
+                ctl.refresh();
+            });
+        }
+        {
+            let c = controller.clone();
+            controller.borrow().ui.on_toggle_show_ignored(move || {
+                let mut ctl = c.borrow_mut();
+                ctl.show_ignored = !ctl.show_ignored;
+                ctl.force_refresh = true;
+                ctl.refresh();
+            });
+        }
+        {
+            let c = controller.clone();
             controller.borrow().ui.on_set_autostart(move |enabled| {
                 let mut ctl = c.borrow_mut();
                 ctl.settings.autostart = enabled;
@@ -1336,6 +1476,33 @@ impl AppController {
         self.settings.paused_until = 0;
         self.save_settings();
         self.force_refresh = true;
+    }
+
+    fn edit_app(&mut self, id: i64) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let Some(info) = store.app_infos(&[id]).remove(&id) else {
+            return;
+        };
+        self.editing_app = Some(id);
+        self.editor_alias = info.alias.clone().unwrap_or_default();
+        self.editor_ignored = info.ignored;
+        self.ui.set_app_editor_name(info.name.clone().into());
+        self.ui
+            .set_app_editor_alias(self.editor_alias.clone().into());
+        self.ui.set_app_editor_ignored(info.ignored);
+        self.ui.set_app_editor_open(true);
+    }
+
+    pub fn edit_app_for_render(&mut self, id: i64) {
+        self.edit_app(id);
+    }
+
+    pub fn show_ignored_for_render(&mut self, show: bool) {
+        self.show_ignored = show;
+        self.force_refresh = true;
+        self.refresh();
     }
 
     fn save_settings(&mut self) {
@@ -1708,7 +1875,48 @@ fn pause_status_line(paused: bool, remaining: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PAUSE_SECONDS, pause_deadline, presence_note};
+    use super::{
+        MAX_PAUSE_SECONDS, backfill_icons_with, display_name, pause_deadline, presence_note,
+    };
+    use crate::db::Store;
+    use crate::desktop::ResolvedApp;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "daymark-app-{tag}-{}-{:?}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn db(&self) -> PathBuf {
+            self.0.join("daymark.db")
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn app(key: &str) -> ResolvedApp {
+        ResolvedApp {
+            key: key.into(),
+            name: key.into(),
+            icon: None,
+            desktop_id: None,
+            wm_class: None,
+            matched: false,
+        }
+    }
 
     #[test]
     fn presence_note_is_quiet_and_hidden_at_zero() {
@@ -1729,5 +1937,29 @@ mod tests {
             1_000 + MAX_PAUSE_SECONDS,
             "a malformed length is bounded"
         );
+    }
+
+    #[test]
+    fn an_alias_is_used_only_when_it_has_text() {
+        assert_eq!(display_name(None, "Recorded"), "Recorded");
+        assert_eq!(display_name(Some(""), "Recorded"), "Recorded");
+        assert_eq!(display_name(Some("   "), "Recorded"), "Recorded");
+        assert_eq!(display_name(Some("Writing"), "Recorded"), "Writing");
+    }
+
+    #[test]
+    fn icon_backfill_updates_only_apps_with_a_resolved_icon() {
+        let dir = TempDir::new("backfill");
+        let store = Store::open_at(&dir.db()).unwrap();
+        store.upsert_app(&app("a"), 0).unwrap();
+        store.upsert_app(&app("b"), 0).unwrap();
+
+        let updated = backfill_icons_with(&store, |info| {
+            (info.key == "a").then(|| "icon-a".to_string())
+        });
+        assert_eq!(updated, 1);
+        let missing = store.apps_missing_icons().unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].key, "b");
     }
 }
