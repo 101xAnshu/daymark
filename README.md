@@ -58,6 +58,7 @@ not the headless footprint.
 | A totals-only state for days whose raw intervals have aged out, with the day's total and per-app split intact | Invented hourly detail for days that no longer have sessions |
 | A seven-day rhythm view — a 7×24 heatmap of when the week is busy | Streaks, scores or guilt mechanics |
 | A per-app breakdown with real icons and quiet time bars | Window titles, keystrokes, clipboard data or screenshots |
+| Per-app aliases, ignore rules and share percentages | Renaming the recorded app identity |
 | Fourteen days of history at a glance | Cloud sync, analytics, telemetry or any network code |
 | An opt-in weekly digest — one local notification on Monday | Email digests or cloud reports |
 | System light/dark that follows GNOME live | A WebView, Electron or Node runtime |
@@ -234,6 +235,10 @@ graphical session.
   smaller headless mode.
 - Search filters the application list by name. Clicking anywhere outside the
   field releases focus.
+- Click the `...` control on an app row to give it a display name or ignore it.
+  Ignored apps are hidden from the list and shares; **Show ignored** reveals
+  them. Shares are the app's portion of the whole day total, which still
+  includes time from ignored apps.
 - The tray icon appears while Daymark has an interface. Its menu opens the
   window, starts a 15 minute pause, a one hour pause or a pause until resumed,
   resumes tracking, and quits the app. The icon and tooltip show the paused
@@ -389,7 +394,7 @@ and falls back to the two-second poll if the watch cannot be created.
 
 ## Verification
 
-- `cargo test --lib`: **133 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **143 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
   across midnight, idle-gap exclusion, per-app totals, day metrics and timeline
   segmentation (empty days, gaps, overlaps, after-midnight and cross-midnight
@@ -414,7 +419,8 @@ and falls back to the two-second poll if the watch cannot be created.
   v4 migration, the weekly digest computation, notification payload and
   preference round-trip, digest delivery and once-a-day gating, local APT
   policy/status parsing with numeric version comparison, app alias and ignore
-  storage with the icon-backfill query, privacy-safe domain extraction, and the
+  storage, share labels, visible-row filtering that keeps the day total honest,
+  the startup icon-backfill selection, privacy-safe domain extraction, and the
   pause command encoding and socket-line mapping.
 - `cargo test --bin daymark`: **8 passed** — tray menu order and the
   paused-only Resume item, pause preset to seconds and socket command mapping,
