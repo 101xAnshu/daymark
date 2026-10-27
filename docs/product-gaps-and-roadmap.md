@@ -28,7 +28,7 @@ The product should be reliable, private, native, and easy to install and keep ru
 ## V2 progress
 
 - The Rhythm view is implemented on `v2`: a 7×24 heatmap for the last seven days,
-  with hour labels, per-day totals, and a legend. The library has **143 tests**, plus
+  with hour labels, per-day totals, and a legend. The library has **145 tests**, plus
   **8 tray tests** in the binary crate.
 - The Day view now has a metrics row and a 24-hour timeline on `v2`. The metrics row
   reports the longest uninterrupted stretch, distinct apps, time after midnight
@@ -65,9 +65,11 @@ The product should be reliable, private, native, and easy to install and keep ru
   from rows and shares while keeping the whole day total, and a `...` editor sets the
   display name or ignore rule. **Show ignored** reveals hidden rows so they can be
   edited again. The recorded app identity is never renamed.
-- Privacy-safe domain extraction is implemented on `v2`: http(s) host only, no paths,
-  queries, titles or full URLs, and localhost/IP literals are rejected. The browser
-  history reader and the opt-in site-names UI are still pending.
+- Opt-in site names are implemented on `v2`: Firefox and Chromium-family history is
+  read read-only, only domains and approximate daily seconds are stored, the Day view
+  shows the top domains for the selected day, and turning the setting off deletes the
+  stored domains. No URLs, paths, queries, page titles or private-window visits are
+  stored.
 - The tray is implemented on `v2`: a small StatusNotifierItem menu offers Open
   Daymark, Pause 15 minutes, Pause 1 hour, Pause until resumed, Resume while
   paused, and Quit Daymark. It drives the existing local socket command path,
@@ -245,7 +247,7 @@ sessions into another day. A domain rollup would follow only if domains are adde
 
 ### Tests and measurement
 
-The tree now has 143 library tests and 8 tray tests covering date handling, storage,
+The tree now has 145 library tests and 8 tray tests covering date handling, storage,
 recovery, migration, pruning, daily rollup preservation and raw/rollup merging (raw
 intervals win, totals-only days, old empty days), settings, single instance, tracker
 behavior, the inotify watch
@@ -255,8 +257,8 @@ metrics and timeline segmentation across midnight and idle gaps, idle_ms parsing
 two-hour presence boundary, input return, lock and idle precedence, presence persistence
 and the v3 to v4 migration, weekly digest delivery and once-a-day gating, local APT
 policy/status parsing, app alias/ignore storage, share labels and visible-row filtering,
-icon-backfill selection, domain extraction, read-only doctor/status output, pause command
-encoding, and tray
+icon-backfill selection, domain extraction, browser history reading and domain storage,
+read-only doctor/status output, pause command encoding, and tray
 menu, icon and pause-state mapping. Some tracker tests still
 use real sleeps and wall time.
 
@@ -352,7 +354,8 @@ windows by design. Stage 1 can be a small title-only site map with no history re
 ### P3 and V3
 
 20. Add opt-in, privacy-preserving domain naming with title hashes and read-only history,
-    or a browser companion that reports the active domain.
+    or a browser companion that reports the active domain. **Implemented on `v2` as an
+    opt-in, domain-only reader of local browser history; no titles or URLs are stored.**
 21. Add a weekly `VACUUM INTO` backup and keep two copies.
 22. Add a signed APT repository.
 23. Split the collector and GUI only if domains or the tray make the collector too large.
@@ -436,7 +439,7 @@ These choices are fixed for V1.
   inhibitors, and session-bus MPRIS playback.
 - `ui/app.slint` holds the day metrics row, 24-hour timeline, presence note, week, hourly,
   history, search, settings, first-run, and banner views.
-- The current tree has 143 library tests and 8 tray tests, CI, amd64 and arm64 `.deb`
+- The current tree has 145 library tests and 8 tray tests, CI, amd64 and arm64 `.deb`
   packaging, x86_64 and aarch64 `.rpm` packaging, `doctor`, timed pause, the first-run
   flow, the noise floor, the Rhythm
   heatmap, the inotify watch, the day metrics and timeline, the audio/inhibitor presence

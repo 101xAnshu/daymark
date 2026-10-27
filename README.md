@@ -60,6 +60,7 @@ not the headless footprint.
 | A per-app breakdown with real icons and quiet time bars | Window titles, keystrokes, clipboard data or screenshots |
 | Per-app aliases, ignore rules and share percentages | Renaming the recorded app identity |
 | Fourteen days of history at a glance | Cloud sync, analytics, telemetry or any network code |
+| Opt-in, domain-only site names from local browser history | URLs, page titles or browser history by default |
 | An opt-in weekly digest — one local notification on Monday | Email digests or cloud reports |
 | System light/dark that follows GNOME live | A WebView, Electron or Node runtime |
 | A small GNOME companion that publishes one JSON file | A background process that animates or redraws while you are idle |
@@ -245,10 +246,13 @@ graphical session.
   state. An absent StatusNotifierItem/AppIndicator host only removes the icon;
   the rest of the app keeps working.
 - Settings holds the idle timeout, retention, appearance, autostart, the weekly
-  digest toggle, pause options (15 minutes, 1 hour, or until resumed), a local
-  package-update notice, the data folder shortcut, and delete/quit actions. A
-  timed pause ends by itself, even while the window is hidden; a pause without a
-  deadline ends at the next app start.
+  digest toggle, site names (off by default), pause options (15 minutes, 1 hour,
+  or until resumed), a local package-update notice, the data folder shortcut, and
+  delete/quit actions. A timed pause ends by itself, even while the window is
+  hidden; a pause without a deadline ends at the next app start.
+- Site names is opt-in. When it is on, the Day view shows the top domains from
+  local browser history for the selected day. Turning it off deletes the stored
+  domains.
 
 ## Diagnostics
 
@@ -364,6 +368,11 @@ the dashboard says so and links back to setup.
   orphaned application rows. The Day view marks those days **Totals only**.
 - No analytics, telemetry, network access, window titles, keystrokes,
   screenshots or clipboard contents.
+- Site names is off by default. When enabled, Daymark reads local browser
+  history read-only from Firefox, Chrome, Chromium, Brave and Edge, extracts
+  domains, and stores only the domain and approximate daily seconds. It never
+  stores URLs, paths, queries, page titles or private-window visits. Turning the
+  setting off deletes the stored domains.
 
 A fresh database is 4 KB; the WAL is typically about 40 KB while Daymark runs and
 is checkpointed normally.
@@ -394,7 +403,7 @@ and falls back to the two-second poll if the watch cannot be created.
 
 ## Verification
 
-- `cargo test --lib`: **143 passed** — date/DST arithmetic and midnight bounds,
+- `cargo test --lib`: **145 passed** — date/DST arithmetic and midnight bounds,
   interval overlap and hourly aggregation, seven-day hourly heatmap aggregation
   across midnight, idle-gap exclusion, per-app totals, day metrics and timeline
   segmentation (empty days, gaps, overlaps, after-midnight and cross-midnight
@@ -420,8 +429,9 @@ and falls back to the two-second poll if the watch cannot be created.
   preference round-trip, digest delivery and once-a-day gating, local APT
   policy/status parsing with numeric version comparison, app alias and ignore
   storage, share labels, visible-row filtering that keeps the day total honest,
-  the startup icon-backfill selection, privacy-safe domain extraction, and the
-  pause command encoding and socket-line mapping.
+  the startup icon-backfill selection, privacy-safe domain extraction, browser
+  history reading and domain storage/scanning, and the pause command encoding
+  and socket-line mapping.
 - `cargo test --bin daymark`: **8 passed** — tray menu order and the
   paused-only Resume item, pause preset to seconds and socket command mapping,
   expired-pause display, the minute poll key, tooltip text, and the distinct
